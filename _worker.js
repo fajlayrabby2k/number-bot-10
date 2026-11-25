@@ -1,0 +1,1461 @@
+// ============================================================================
+// Telegram SMS/OTP Bot — Single-File Cloudflare Pages (_worker.js) + D1
+// Zero npm dependencies. Ready for direct GitHub -> Cloudflare Pages deploy.
+// ============================================================================
+
+// ============ 1. CONFIGURATION & CONSTANTS ============
+const USD_TO_BDT = 128.0;
+const NUMBERS_PER_REQUEST = 3;
+const NUMBER_VALIDITY_SECONDS = 600;
+const DEFAULT_REQUIRED_CHANNELS = ["@ROXYSMSNEWS"];
+
+const ADMIN_PERMISSIONS = {
+  numbers: "📱 Add/Remove Numbers",
+  otp_inbox: "📥 OTP Inbox & API",
+  wallet: "💰 Wallet & Rates",
+  withdraw: "💳 Withdraw Requests",
+  filter: "🛡️ Number Filter",
+  stats: "📊 Stats & Live Traffic",
+  broadcast: "📢 Broadcast & Channels",
+  platforms: "🌐 Platform & Providers",
+  control: "⚙️ System & Backup",
+};
+
+const OTP_PATTERNS = [
+  /(?:Your Code|Code|OTP|Codigo|verification|OTP Code|Pin|Secret Code)\s*(?:➡️|:|\s|is)\s*([\d\s-]{3,8})/i,
+  /G-([\d]{4,8}) is your Google verification code/i,
+  /#\s*([\d]{4,8})\s*is your Facebook code/i,
+  /Your WhatsApp(?: Business)? code\s*([\d\s-]{3,8})/i,
+  /code is\s*[:\s]*(\d{3,8})/i,
+  /code:\s*(\d{3,8})/i,
+  /otp:\s*(\d{3,8})/i,
+  /\b(\d{3}[-\s]\d{3,4})\b/i,
+  /\b(\d{4,8})\b/i,
+];
+
+const NUMBER_PATTERNS = [
+  /(?:Number|Mobile|Phone|Tel|To|Acc|Account|📱|☎️|📞)\s*[:\s]*(\+?[\d•*xX⁕\s-]{6,})/i,
+  /(\+?\d{1,4}[\s.\-]?\(?\d{2,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,5})/,
+  /(\+?[\d]{2,}[*xX•⁕\s.\-]{2,}[\d]{2,})/,
+  /(\b[\d]*[*xX•⁕]+[\d]{3,}\b|\b\d{10,}\b)/i,
+  /(\d{3,}[*xX•⁕]+\d{3,})/i,
+  /(\b\d{9,16}\b)/,
+  /(\+?\d{8,16})/,
+];
+
+const COUNTRY_MAP = {
+  "1": "🇺🇸 USA / Canada", "7": "🇷🇺 Russia / Kazakhstan", "20": "🇪🇬 Egypt", "27": "🇿🇦 South Africa",
+  "30": "🇬🇷 Greece", "31": "🇳🇱 Netherlands", "32": "🇧🇪 Belgium", "33": "🇫🇷 France", "34": "🇪🇸 Spain",
+  "36": "🇭🇺 Hungary", "39": "🇮🇹 Italy", "40": "🇷🇴 Romania", "41": "🇨🇭 Switzerland", "43": "🇦🇹 Austria",
+  "44": "🇬🇧 United Kingdom", "45": "🇩🇰 Denmark", "46": "🇸🇪 Sweden", "47": "🇳🇴 Norway", "48": "🇵🇱 Poland",
+  "49": "🇩🇪 Germany", "51": "🇵🇪 Peru", "52": "🇲🇽 Mexico", "53": "🇨🇺 Cuba", "54": "🇦🇷 Argentina",
+  "55": "🇧🇷 Brazil", "56": "🇨🇱 Chile", "57": "🇨🇴 Colombia", "58": "🇻🇪 Venezuela", "60": "🇲🇾 Malaysia",
+  "61": "🇦🇺 Australia", "62": "🇮🇩 Indonesia", "63": "🇵🇭 Philippines", "64": "🇳🇿 New Zealand", "65": "🇸🇬 Singapore",
+  "66": "🇹🇭 Thailand", "81": "🇯🇵 Japan", "82": "🇰🇷 South Korea", "84": "🇻🇳 Vietnam", "86": "🇨🇳 China",
+  "90": "🇹🇷 Turkey", "91": "🇮🇳 India", "92": "🇵🇰 Pakistan", "93": "🇦🇫 Afghanistan", "94": "🇱🇰 Sri Lanka",
+  "95": "🇲🇲 Myanmar", "98": "🇮🇷 Iran", "211": "🇸🇸 South Sudan", "212": "🇲🇦 Morocco", "213": "🇩🇿 Algeria",
+  "216": "🇹🇳 Tunisia", "218": "🇱🇾 Libya", "220": "🇬🇲 Gambia", "221": "🇸🇳 Senegal", "222": "🇲🇷 Mauritania",
+  "223": "🇲🇱 Mali", "224": "🇬🇳 Guinea", "225": "🇨🇮 Ivory Coast", "226": "🇧🇫 Burkina Faso", "227": "🇳🇪 Niger",
+  "228": "🇹🇬 Togo", "229": "🇧🇯 Benin", "230": "🇲🇺 Mauritius", "231": "🇱🇷 Liberia", "232": "🇸🇱 Sierra Leone",
+  "233": "🇬🇭 Ghana", "234": "🇳🇬 Nigeria", "235": "🇹🇩 Chad", "236": "🇨🇫 Central African Republic",
+  "237": "🇨🇲 Cameroon", "238": "🇨🇻 Cape Verde", "239": "🇸🇹 Sao Tome & Principe", "240": "🇬🇶 Equatorial Guinea",
+  "241": "🇬🇦 Gabon", "242": "🇨🇬 Congo", "243": "🇨🇩 DR Congo", "244": "🇦🇴 Angola", "245": "🇬🇼 Guinea-Bissau",
+  "246": "🇮🇴 British Indian Ocean Territory", "248": "🇸🇨 Seychelles", "249": "🇸🇩 Sudan", "250": "🇷🇼 Rwanda",
+  "251": "🇪🇹 Ethiopia", "252": "🇸🇴 Somalia", "253": "🇩🇯 Djibouti", "254": "🇰🇪 Kenya", "255": "🇹🇿 Tanzania",
+  "256": "🇺🇬 Uganda", "257": "🇧🇮 Burundi", "258": "🇲🇿 Mozambique", "260": "🇿🇲 Zambia", "261": "🇲🇬 Madagascar",
+  "262": "🇷🇪 Reunion", "263": "🇿🇼 Zimbabwe", "264": "🇳🇦 Namibia", "265": "🇲🇼 Malawi", "266": "🇱🇸 Lesotho",
+  "267": "🇧🇼 Botswana", "268": "🇸🇿 Eswatini", "269": "🇰🇲 Comoros", "290": "🇸🇭 Saint Helena", "291": "🇪🇷 Eritrea",
+  "297": "🇦🇼 Aruba", "298": "🇫🇴 Faroe Islands", "299": "🇬🇱 Greenland", "350": "🇬🇮 Gibraltar", "351": "🇵🇹 Portugal",
+  "352": "🇱🇺 Luxembourg", "353": "🇮🇪 Ireland", "354": "🇮🇸 Iceland", "355": "🇦🇱 Albania", "356": "🇲🇹 Malta",
+  "357": "🇨🇾 Cyprus", "358": "🇫🇮 Finland", "359": "🇧🇬 Bulgaria", "370": "🇱🇹 Lithuania", "371": "🇱🇻 Latvia",
+  "372": "🇪🇪 Estonia", "373": "🇲🇩 Moldova", "374": "🇦🇲 Armenia", "375": "🇧🇾 Belarus", "376": "🇦🇩 Andorra",
+  "377": "🇲🇨 Monaco", "378": "🇸🇲 San Marino", "379": "🇻🇦 Vatican City", "380": "🇺🇦 Ukraine", "381": "🇷🇸 Serbia",
+  "382": "🇲🇪 Montenegro", "383": "🇽🇰 Kosovo", "385": "🇭🇷 Croatia", "386": "🇸🇮 Slovenia",
+  "387": "🇧🇦 Bosnia & Herzegovina", "389": "🇲🇰 North Macedonia", "420": "🇨🇿 Czech Republic", "421": "🇸🇰 Slovakia",
+  "423": "🇱🇮 Liechtenstein", "500": "🇫🇰 Falkland Islands", "501": "🇧🇿 Belize", "502": "🇬🇹 Guatemala",
+  "503": "🇸🇻 El Salvador", "504": "🇭🇳 Honduras", "505": "🇳🇮 Nicaragua", "506": "🇨🇷 Costa Rica", "507": "🇵🇦 Panama",
+  "508": "🇵🇲 Saint Pierre & Miquelon", "509": "🇭🇹 Haiti", "590": "🇬🇵 Guadeloupe", "591": "🇧🇴 Bolivia",
+  "592": "🇬🇾 Guyana", "593": "🇪🇨 Ecuador", "594": "🇬🇫 French Guiana", "595": "🇵🇾 Paraguay", "596": "🇲🇶 Martinique",
+  "597": "🇸🇷 Suriname", "598": "🇺🇾 Uruguay", "599": "🇨🇼 Curacao", "670": "🇹🇱 Timor-Leste", "672": "🇦🇶 Antarctica",
+  "673": "🇧🇳 Brunei", "674": "🇳🇷 Nauru", "675": "🇵🇬 Papua New Guinea", "676": "🇹🇴 Tonga", "677": "🇸🇧 Solomon Islands",
+  "678": "🇻🇺 Vanuatu", "679": "🇫🇯 Fiji", "680": "🇵🇼 Palau", "681": "🇼🇫 Wallis & Futuna", "682": "🇨🇰 Cook Islands",
+  "683": "🇳🇺 Niue", "685": "🇼🇸 Samoa", "686": "🇰🇮 Kiribati", "687": "🇳🇨 New Caledonia", "688": "🇹🇻 Tuvalu",
+  "689": "🇵🇫 French Polynesia", "690": "🇹🇰 Tokelau", "691": "🇫🇲 Micronesia", "692": "🇲🇭 Marshall Islands",
+  "850": "🇰🇵 North Korea", "852": "🇭🇰 Hong Kong", "853": "🇲🇴 Macau", "855": "🇰🇭 Cambodia", "856": "🇱🇦 Laos",
+  "870": "📡 Satellite", "880": "🇧🇩 Bangladesh", "886": "🇹🇼 Taiwan", "960": "🇲🇻 Maldives", "961": "🇱🇧 Lebanon",
+  "962": "🇯🇴 Jordan", "963": "🇸🇾 Syria", "964": "🇮🇶 Iraq", "965": "🇰🇼 Kuwait", "966": "🇸🇦 Saudi Arabia",
+  "967": "🇾🇪 Yemen", "968": "🇴🇲 Oman", "970": "🇵🇸 Palestine", "971": "🇦🇪 UAE", "972": "🇮🇱 Israel",
+  "973": "🇧🇭 Bahrain", "974": "🇶🇦 Qatar", "975": "🇧🇹 Bhutan", "976": "🇲🇳 Mongolia", "977": "🇳🇵 Nepal",
+  "992": "🇹🇯 Tajikistan", "993": "🇹🇲 Turkmenistan", "994": "🇦🇿 Azerbaijan", "995": "🇬🇪 Georgia",
+  "996": "🇰🇬 Kyrgyzstan", "998": "🇺🇿 Uzbekistan",
+};
+
+const CUSTOM_EMOJIS = {
+  home: "5465226866321268133", shield: "5352888345972187597", link: "6307644762530782800",
+  lightning: "4990225396306805545", diamond: "5328098344495490329", chart: "6084477132254218612",
+  check: "6003547523057194167", heart: "5215286931067251318", package: "4990298741463319592",
+  folder: "5433653135799228968", plus: "5226945370684140473", trash: "5231339530249845638",
+  cross: "5231339530249845638", edit: "6301092489273018328", warning: "5352888345972187597",
+  user: "5372926953978341366", phone: "5407025283456835913", fire: "4990225396306805545",
+  megaphone: "6239911547724895865", get_number: "5332531536723984111", live_system: "6001546944470587024",
+  wallet: "5190576863226933563", support_pro: "5190498849440931467", facebook: "5330470948854314862",
+  whatsapp: "5233354831984353090", instagram: "5364310996179503764", tiktok: "5391044040860906456",
+  telegram: "5364125616801073577", imo: "6237849688544910140", timer: "6084396322444544568",
+  refresh: "6282702779341346176", globe: "5399898266265475100", globe_new: "5224450179368767019",
+  mobile: "5407025283456835913", stats: "6212722789833514739", back: "5352759161945867747",
+  money: "6170011680831969294", users: "5372926953978341366", handshake: "5456371000239212004",
+  tv: "5373330964372004748", broadcast: "5316847419965579451", clipboard: "6301092489273018328",
+  withdraw: "6185774116319006168", set_wallet: "5213470220030585409", bkash: "6237975191784266396",
+  nagad: "6235336389647407554", binance: "6237610939902858402", withdraw_requests: "6239911547724895865",
+  otp_settings: "6001546944470587024", otp_group: "5195343031384950165", last_48h_otp: "6249228719064356119",
+  number_copy: "5861680977994060034", otp_copy: "5330115548900501467", otp_bubbles: "6192618748000609137",
+  dollar: "5258435482487900483", otp_icon: "6235235303297128975", channel_settings: "6239911547724895865",
+  lb_otp: "5353032893096567467", lb_money: "5190576863226933563", lb_rate: "5420396762189831222",
+  rank_1: "5352651766288652742", rank_2: "5355186458418257716", rank_3: "5352867219028091093",
+  rank_4: "5352566657216714037", rank_5: "5353086880835474989", lb_trophy: "6266973397922616654",
+  lb_refresh: "6282702779341346176", lb_timer: "5978841844673416652", lb_rules: "5264821604935804414",
+  lb_crown: "6266995104687330978", download: "6266818688905648040",
+};
+
+const PLATFORM_EMOJIS = {
+  Whatsapp: CUSTOM_EMOJIS.whatsapp, WhatsApp: CUSTOM_EMOJIS.whatsapp, Telegram: CUSTOM_EMOJIS.telegram,
+  Facebook: CUSTOM_EMOJIS.facebook, Tiktok: CUSTOM_EMOJIS.tiktok, TikTok: CUSTOM_EMOJIS.tiktok,
+  Instagram: CUSTOM_EMOJIS.instagram, IMO: CUSTOM_EMOJIS.imo, Imo: CUSTOM_EMOJIS.imo,
+};
+
+const FLAG_CUSTOM_EMOJIS = {
+  US: "5913463998522592692", UA: "5911406692007941050", PL: "5913550391789752571", KZ: "5913724621433082323",
+  CN: "5913779335021466780", AZ: "5911197578640233518", RU: "5913274246867456342", ZM: "5913564754160389778",
+  BR: "5911148568768418614", IN: "5913754823643107921", GB: "5913443365499703513", TR: "5910995113881901195",
+  JP: "5913293711659241040", DE: "5911096835887337583", UZ: "5911051846104912282", YE: "5913346492512341993",
+  VN: "5913428887164949581", AE: "5913726554168365343", CH: "5913271227505448072", TJ: "5911287639809463107",
+  TZ: "5911418949844603556", TH: "5913617968805187987", TG: "5913423260757790970", TN: "5911332947419468671",
+  TM: "5913315521503170180", UG: "5913488939397681980", SE: "5911156510162949403", SZ: "5913374525763883286",
+  SR: "5913275539652611719", SD: "5911387497799094470", ES: "5911193287967904547", LK: "5911293163137406640",
+  SS: "5911406262511211744", KR: "5913371673905598425", ZA: "5911203119148044594", SN: "5910995302860461643",
+  RS: "5913592598433369871", SC: "5911185183364616913", SL: "5911210450657218661", SG: "5911531460808051849",
+  SI: "5913431983836368644", SK: "5913751666842145020", SB: "5911482712929080608", SO: "5911397852965244436",
+  SA: "5911300687920108242", ST: "5913574331937462345", SM: "5913587968458625465", WS: "5913325971158602854",
+  KN: "5913691898077253637", VC: "5911318941531116255", LC: "5911243659344351824", PS: "5913684768431541668",
+  PG: "5911107251183030903", PY: "5911014265141072316", PE: "5911207993935925780", PH: "5911268638874145162",
+  PT: "5911023653939581472", QA: "5911260864983339619", RO: "5913460373570195273", RW: "5911455229433352234",
+  NL: "5913367645226275100", NP: "5913496520014958723", NA: "5911108535378252443", MZ: "5911333419865871464",
+  MA: "5911482111633658301", ME: "5913239436157522151", MC: "5911245347266500057", MN: "5911041383564580038",
+  MD: "5913456847402045950", MV: "5913501399097806832", ML: "5911305266355245916", MT: "5911023714069123567",
+  MU: "5913291113204027321", MX: "5913687302462246518", FM: "5911271104185373336", MY: "5913654360063087453",
+  KE: "5913656245553730622", MG: "5913766918271012920", MK: "5913394029210374721", LU: "5913390842344640293",
+  LT: "5911172315642597775", LI: "5911166650580734660", LY: "5911236989260140996", LR: "5913324167272337727",
+  XK: "5911433681582429010", KW: "5913290705182134003", KG: "5911202161370337549", LA: "5913718526874489279",
+  LV: "5913738489882480243", LB: "5911504273664905447", LS: "5911059881988723711", JO: "5913234136167878475",
+  JM: "5913232280742006526", IE: "5913427959452012488", IT: "5913688444923547525", IL: "5911471936856134692",
+  IQ: "5911382442622587735", IR: "5920160977818489355", ID: "5913479361620611038", GT: "5913324858762072330",
+  GW: "5911398694778836149", GY: "5913579412883771480", HT: "5913459789454643194", HN: "5911406889576436289",
+  HU: "5913767635530551104", IS: "5911047899029967246", GR: "5911210399117611448", GH: "5913391155877252952",
+  GE: "5913434771270144023", GM: "5913657267755945883", GA: "5911037896051137264", FR: "5913605586414473124",
+  FI: "5911041344909873378", FJ: "5911393832875856716", ET: "5911078333168227043", DO: "5911152099231536123",
+  TL: "5911141915864076479", EC: "5911273865849347408", SV: "5913238624408703010", EG: "5913694831539916769",
+  EE: "5910986042910969906", DK: "5911206009661034712", CY: "5911023550860366409", HR: "5913692684056269311",
+  CR: "5911261745451635030", CG: "5911338788574990168", CD: "5913770362834783827", KM: "5911338582416560604",
+  KH: "5913699998385573485", CM: "5911172109484167745", CA: "5913623736946265914", CV: "5913571501554012193",
+  CZ: "5911198691036764307", CL: "5911470957603592832", CO: "5913773060074246009", BF: "5913407764515786948",
+  BG: "5911263776971168517", BN: "5911336409163109113", BW: "5911513782722499475", BA: "5913700002680541032",
+  BO: "5913638795101606133", BT: "5913236734623093021", BJ: "5913735869952430547", AR: "5913573356979884082",
+  AU: "5913632326880858455", AT: "5911338831524664592", BD: "5911365056594973179", BH: "5913581663446634403",
+  BB: "5911016996740272263", BE: "5913529642802745141", BZ: "5913355005137522807", AG: "5913389025573475085",
+  AO: "5913753316109586411", AD: "5911314702398396902", DZ: "5913782968563800236", AL: "5911357458797826163",
+  AF: "5913492040364068694", ZW: "5911092502265336396", MM: "5433666360003540231",
+};
+
+const DIAL_TO_ISO = {
+  "1": "US", "7": "RU", "20": "EG", "27": "ZA", "30": "GR", "31": "NL", "32": "BE", "33": "FR", "34": "ES", "36": "HU",
+  "39": "IT", "40": "RO", "41": "CH", "43": "AT", "44": "GB", "45": "DK", "46": "SE", "47": "NO", "48": "PL", "49": "DE",
+  "51": "PE", "52": "MX", "53": "CU", "54": "AR", "55": "BR", "56": "CL", "57": "CO", "58": "VE", "60": "MY", "61": "AU",
+  "62": "ID", "63": "PH", "64": "NZ", "65": "SG", "66": "TH", "81": "JP", "82": "KR", "84": "VN", "86": "CN", "90": "TR",
+  "91": "IN", "92": "PK", "93": "AF", "94": "LK", "95": "MM", "98": "IR", "211": "SS", "212": "MA", "213": "DZ", "216": "TN",
+  "218": "LY", "220": "GM", "221": "SN", "222": "MR", "223": "ML", "224": "GN", "225": "CI", "226": "BF", "227": "NE", "228": "TG",
+  "229": "BJ", "230": "MU", "231": "LR", "232": "SL", "233": "GH", "234": "NG", "235": "TD", "236": "CF", "237": "CM", "238": "CV",
+  "239": "ST", "240": "GQ", "241": "GA", "242": "CG", "243": "CD", "244": "AO", "245": "GW", "248": "SC", "249": "SD", "250": "RW",
+  "251": "ET", "252": "SO", "253": "DJ", "254": "KE", "255": "TZ", "256": "UG", "257": "BI", "258": "MZ", "260": "ZM", "261": "MG",
+  "262": "RE", "263": "ZW", "264": "NA", "265": "MW", "266": "LS", "267": "BW", "268": "SZ", "269": "KM", "290": "SH", "291": "ER",
+  "297": "AW", "298": "FO", "299": "GL", "350": "GI", "351": "PT", "352": "LU", "353": "IE", "354": "IS", "355": "AL", "356": "MT",
+  "357": "CY", "358": "FI", "359": "BG", "370": "LT", "371": "LV", "372": "EE", "373": "MD", "374": "AM", "375": "BY", "376": "AD",
+  "377": "MC", "378": "SM", "379": "VA", "380": "UA", "381": "RS", "382": "ME", "383": "XK", "385": "HR", "386": "SI", "387": "BA",
+  "389": "MK", "420": "CZ", "421": "SK", "423": "LI", "500": "FK", "501": "BZ", "502": "GT", "503": "SV", "504": "HN", "505": "NI",
+  "506": "CR", "507": "PA", "508": "PM", "509": "HT", "590": "GP", "591": "BO", "592": "GY", "593": "EC", "594": "GF", "595": "PY",
+  "596": "MQ", "597": "SR", "598": "UY", "599": "CW", "670": "TL", "673": "BN", "674": "NR", "675": "PG", "676": "TO", "677": "SB",
+  "678": "VU", "679": "FJ", "680": "PW", "681": "WF", "682": "CK", "683": "NU", "685": "WS", "686": "KI", "687": "NC", "688": "TV",
+  "689": "PF", "690": "TK", "691": "FM", "692": "MH", "850": "KP", "852": "HK", "853": "MO", "855": "KH", "856": "LA", "880": "BD",
+  "886": "TW", "960": "MV", "961": "LB", "962": "JO", "963": "SY", "964": "IQ", "965": "KW", "966": "SA", "967": "YE", "968": "OM",
+  "970": "PS", "971": "AE", "972": "IL", "973": "BH", "974": "QA", "975": "BT", "976": "MN", "977": "NP", "992": "TJ", "993": "TM",
+  "994": "AZ", "995": "GE", "996": "KG", "998": "UZ",
+};
+
+const EMOJI_TO_CUSTOM_TAG = {
+  "❌": '<tg-emoji emoji-id="5231339530249845638">❌</tg-emoji>',
+  "✅": '<tg-emoji emoji-id="6003547523057194167">✅</tg-emoji>',
+  "⚡": '<tg-emoji emoji-id="4990225396306805545">⚡</tg-emoji>',
+  "📱": '<tg-emoji emoji-id="5407025283456835913">📱</tg-emoji>',
+  "💰": '<tg-emoji emoji-id="6170011680831969294">💰</tg-emoji>',
+  "👤": '<tg-emoji emoji-id="5372926953978341366">👤</tg-emoji>',
+  "⏰": '<tg-emoji emoji-id="6084396322444544568">⏰</tg-emoji>',
+  "⏱️": '<tg-emoji emoji-id="6084396322444544568">⏱</tg-emoji>',
+  "⏱": '<tg-emoji emoji-id="6084396322444544568">⏱</tg-emoji>',
+  "💳": '<tg-emoji emoji-id="6086980694460861135">💳</tg-emoji>',
+  "💎": '<tg-emoji emoji-id="5328098344495490329">💎</tg-emoji>',
+  "🎁": '<tg-emoji emoji-id="5328098344495490329">🎁</tg-emoji>',
+  "📁": '<tg-emoji emoji-id="5433653135799228968">📁</tg-emoji>',
+  "📂": '<tg-emoji emoji-id="5433653135799228968">📂</tg-emoji>',
+  "🛡️": '<tg-emoji emoji-id="5352888345972187597">🛡</tg-emoji>',
+  "🛡": '<tg-emoji emoji-id="5352888345972187597">🛡</tg-emoji>',
+  "📢": '<tg-emoji emoji-id="5316847419965579451">📢</tg-emoji>',
+  "🟢": '<tg-emoji emoji-id="6001546944470587024">🟢</tg-emoji>',
+  "🔴": '<tg-emoji emoji-id="5231339530249845638">🔴</tg-emoji>',
+  "⚠️": '<tg-emoji emoji-id="5352888345972187597">⚠️</tg-emoji>',
+  "💬": '<tg-emoji emoji-id="6192618748000609137">💬</tg-emoji>',
+  "🔥": '<tg-emoji emoji-id="4990225396306805545">⚡</tg-emoji>',
+  "🌐": '<tg-emoji emoji-id="5399898266265475100">🌐</tg-emoji>',
+  "🌍": '<tg-emoji emoji-id="5399898266265475100">🌍</tg-emoji>',
+  "👥": '<tg-emoji emoji-id="5372926953978341366">👥</tg-emoji>',
+  "🔄": '<tg-emoji emoji-id="6282702779341346176">🔄</tg-emoji>',
+  "🗑️": '<tg-emoji emoji-id="5231339530249845638">🗑</tg-emoji>',
+  "🗑": '<tg-emoji emoji-id="5231339530249845638">🗑</tg-emoji>',
+  "📋": '<tg-emoji emoji-id="6301092489273018328">📋</tg-emoji>',
+  "👝": '<tg-emoji emoji-id="6086980694460861135">👝</tg-emoji>',
+  "🏆": '<tg-emoji emoji-id="6266973397922616654">🏆</tg-emoji>',
+  "⏳": '<tg-emoji emoji-id="5978841844673416652">⏳</tg-emoji>',
+  "📜": '<tg-emoji emoji-id="5264821604935804414">📜</tg-emoji>',
+  "👑": '<tg-emoji emoji-id="6266995104687330978">👑</tg-emoji>',
+  "🏅": '<tg-emoji emoji-id="6212722789833514739">🏅</tg-emoji>',
+  "🎖️": '<tg-emoji emoji-id="6212722789833514739">🎖</tg-emoji>',
+  "🎖": '<tg-emoji emoji-id="6212722789833514739">🎖</tg-emoji>',
+};
+
+const SERVICE_NORM_MAP = {
+  fb: "Facebook", facebook: "Facebook", wa: "WhatsApp", whatsapp: "WhatsApp",
+  g: "Google", google: "Google", tg: "Telegram", telegram: "Telegram",
+  ig: "Instagram", instagram: "Instagram", tt: "Tiktok", tiktok: "Tiktok", imo: "IMO",
+};
+
+const DEFAULT_PLATFORMS = {
+  Facebook: { name: "Facebook", emoji_id: "5330470948854314862", short: "FB" },
+  WhatsApp: { name: "WhatsApp", emoji_id: "5233354831984353090", short: "WA" },
+  Google: { name: "Google", emoji_id: "", short: "G" },
+  Telegram: { name: "Telegram", emoji_id: "5364125616801073577", short: "TG" },
+  Instagram: { name: "Instagram", emoji_id: "5364310996179503764", short: "IG" },
+  Tiktok: { name: "Tiktok", emoji_id: "5391044040860906456", short: "TT" },
+  IMO: { name: "IMO", emoji_id: "6237849688544910140", short: "IMO" },
+};
+
+const DEFAULT_WALLET_CONFIG = {
+  service_rates: {
+    Facebook: { global: 0.5, country: {} }, WhatsApp: { global: 0.5, country: {} },
+    Google: { global: 0.5, country: {} }, Telegram: { global: 0.5, country: {} },
+    Instagram: { global: 0.5, country: {} }, Tiktok: { global: 0.5, country: {} },
+  },
+  min_withdraw: 10.0, withdraw_enabled: true, referral_percent: 10.0,
+  required_channels: ["@ROXYSMSNEWS"], usd_to_bdt_rate: 128.0, usd_to_bdt_migrated: true,
+  oxapay: { api_key: "", currency: "POL", network: "POLYGON", callback_url: "" },
+  manual_withdraw: { enabled: true, min_amount: 10.0, instructions: "Send Bkash number to receive manual payment." },
+  auto_withdraw_limit_per_day: 3, withdraw_tutorial_url: "",
+  hidden_numbers: {}, live_traffic_minutes: 60, live_traffic_mode: 1, live_traffic_show_time: true,
+  external_traffic_api: { enabled: true, url: "", last_sync: 0, last_count: 0 },
+  withdraw_methods: {
+    Bkash: { min_withdraw: 10.0, emoji_id: "6237975191784266396" },
+    Nagad: { min_withdraw: 10.0, emoji_id: "6235336389647407554" },
+    Binance: { min_withdraw: 50.0, emoji_id: "6237610939902858402" },
+  },
+  channel_logs: {
+    withdraw: { enabled: false, chat_id: "", bot_token: "" },
+    otp_group: { enabled: false, chat_id: "", bot_token: "", channel_url: "" },
+    otp_logs: { enabled: false, chat_id: "", bot_token: "" },
+    otp: { enabled: false, chat_id: "", bot_token: "", channel_url: "" },
+  },
+  number_filter: { enabled: true, duration_hours: 24 },
+  default_number_limit: 3, country_number_limits: {},
+  otp_inbox_api: { enabled: true, interval_seconds: 5, last_run: 0, apis: [] },
+  sub_admins: {},
+};
+
+const DEFAULT_LEADERBOARD = {
+  daily_stats: {}, history: {}, claims: {},
+  settings: {
+    enabled: true, cycle_type: "daily", cycle_hours: 24,
+    rates: { diamond: 0.3, gold: 0.25, silver: 0.15, none: 0.1 },
+    requirements: { diamond_min: 31, gold_min: 10, silver_min: 5, streak_days: 7 },
+    top_winners_count: 5, claim_duration_hours: 24,
+  },
+};
+
+const CHANNEL_TITLE_CACHE = {
+  "@ROXYSMSNEWS": "𝗥𝗢𝗫𝗬 𝗦𝗠𝗦 𝗡𝗘𝗪𝗦",
+  "@ROXYMETHOT": "𝐑𝐎𝐗𝐘 𝐌𝐄𝐓𝐇𝐎𝐃",
+  "@ROXYSMSBACKUP": "𝐑𝐎𝐗𝐘 𝐒𝗠𝗦 𝐖𝐎𝐑𝐋𝐃",
+};
+
+// ============ 2. UTILITIES & PURE-JS XLSX PARSER ============
+function nowTs() { return Math.floor(Date.now() / 1000); }
+function escapeHtml(str) { return String(str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function tgEmoji(emojiId, fallback = "✨") { return `<tg-emoji emoji-id="${emojiId || CUSTOM_EMOJIS.diamond}">${fallback}</tg-emoji>`; }
+
+const _sortedPrem = Object.keys(EMOJI_TO_CUSTOM_TAG).sort((a, b) => b.length - a.length);
+const _premRegex = new RegExp(_sortedPrem.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g");
+function premiumizeText(t) {
+  if (!t || typeof t !== "string") return t;
+  return t.split(/(<tg-emoji[^>]*>.*?<\/tg-emoji>)/g).map((tok) => tok.startsWith("<tg-emoji") ? tok : tok.replace(_premRegex, (m) => EMOJI_TO_CUSTOM_TAG[m] || m)).join("");
+}
+
+function splitCountryProvider(key) {
+  if (!key) return ["", ""];
+  const s = String(key).trim();
+  const idx = s.indexOf("#");
+  return idx !== -1 ? [s.slice(0, idx).trim(), s.slice(idx + 1).trim()] : [s, ""];
+}
+function makeCountryProviderKey(ccode, provider = "") {
+  const prov = (provider || "").trim();
+  return prov ? `${String(ccode).trim()}#${prov}` : String(ccode).trim();
+}
+function getCountryDisplayName(key) {
+  const [ccode, prov] = splitCountryProvider(key);
+  const cname = COUNTRY_MAP[ccode] || ccode;
+  const clean = cname.split("/")[0].replace(/[^a-zA-Z\s/]/g, "").trim() || ccode;
+  return prov ? `${clean} ${prov}` : clean;
+}
+function getCountryFlagEmoji(countryCode) {
+  const [dialCode] = splitCountryProvider(countryCode);
+  const iso = DIAL_TO_ISO[String(dialCode)] || String(dialCode).toUpperCase();
+  const eid = FLAG_CUSTOM_EMOJIS[iso];
+  return eid ? `<tg-emoji emoji-id="${eid}">🇺🇳</tg-emoji>` : `<tg-emoji emoji-id="${CUSTOM_EMOJIS.globe}">🌐</tg-emoji>`;
+}
+function normalizeServiceName(svcName) {
+  if (!svcName) return "Facebook";
+  const s = String(svcName).trim();
+  const sl = s.toLowerCase();
+  return SERVICE_NORM_MAP[sl] || (s === sl ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+}
+function getPlatformEmojiHtml(platName, platforms = {}, fallback = "🌐") {
+  const norm = normalizeServiceName(platName);
+  const eid = platforms?.[norm]?.emoji_id || PLATFORM_EMOJIS[norm] || CUSTOM_EMOJIS.mobile;
+  return `<tg-emoji emoji-id="${eid}">${fallback}</tg-emoji>`;
+}
+function getPlatformEmojiId(platName, platforms = {}) {
+  const norm = normalizeServiceName(platName);
+  return platforms?.[norm]?.emoji_id || PLATFORM_EMOJIS[norm] || "";
+}
+function extractCountryCode(number) {
+  const num = String(number || "").replace(/^\+/, "");
+  for (const len of [3, 2, 1]) {
+    if (num.length >= len && COUNTRY_MAP[num.slice(0, len)]) return [num.slice(0, len), num.slice(len)];
+  }
+  return ["unknown", num];
+}
+function formatNumber(number, countryCode) {
+  const [dialCode] = splitCountryProvider(countryCode);
+  const clean = String(number || "").trim();
+  if (clean.startsWith("+")) return clean;
+  if (clean.startsWith("00")) return `+${clean.slice(2)}`;
+  if (dialCode && clean.startsWith(dialCode)) return `+${clean}`;
+  return `+${dialCode}${clean}`;
+}
+function getRewardRate(walletConfig, service, countryCode) {
+  const [dialCode] = splitCountryProvider(countryCode);
+  const svcRates = walletConfig.service_rates || {};
+  const sClean = String(service || "").trim().toLowerCase();
+  const cClean = String(countryCode || "").trim().replace(/^\+/, "");
+  const dClean = String(dialCode || "").trim().replace(/^\+/, "");
+  let matched = null;
+  for (const [k, v] of Object.entries(svcRates)) { if (k.toLowerCase() === sClean) { matched = v; break; } }
+  if (!matched && sClean) {
+    for (const [k, v] of Object.entries(svcRates)) { if (sClean.includes(k.toLowerCase()) || k.toLowerCase().includes(sClean)) { matched = v; break; } }
+  }
+  if (matched && typeof matched === "object") {
+    const cMap = matched.country || {};
+    if (cClean in cMap) return Number(cMap[cClean]);
+    if (dClean in cMap) return Number(cMap[dClean]);
+    if (countryCode in cMap) return Number(cMap[countryCode]);
+    return Number(matched.global ?? 0.5);
+  }
+  return 0.5;
+}
+function getCountryNumberLimit(walletConfig, ccode = null) {
+  const limits = walletConfig.country_number_limits || {};
+  if (ccode) {
+    const [dial] = splitCountryProvider(ccode);
+    const cd = String(dial).replace(/^\+/, "").trim();
+    const cc = String(ccode).replace(/^\+/, "").trim();
+    if (cd in limits) return Math.max(1, parseInt(limits[cd], 10));
+    if (cc in limits) return Math.max(1, parseInt(limits[cc], 10));
+  }
+  return Math.max(1, parseInt(walletConfig.default_number_limit ?? NUMBERS_PER_REQUEST, 10));
+}
+function isServiceCountryHidden(walletConfig, svc, ccode) {
+  const hidden = walletConfig.hidden_numbers || {};
+  const key = `${svc}|${ccode}`;
+  const item = hidden[key];
+  if (!item) return false;
+  if ((item.unhide_at || 0) > 0 && nowTs() >= item.unhide_at) { delete hidden[key]; return false; }
+  return true;
+}
+function isCountryHidden(walletConfig, ccode) {
+  const hidden = walletConfig.hidden_numbers || {};
+  const cStr = String(ccode);
+  for (const [key, item] of Object.entries(hidden)) {
+    let ic = String(item.country || ""), isvc = item.service || "";
+    if (!ic && key.includes("|")) [isvc, ic] = key.split("|", 2);
+    if (ic === cStr && isServiceCountryHidden(walletConfig, isvc, ic)) return true;
+  }
+  return false;
+}
+
+// Pure-JS zero-dependency ZIP + XLSX parser using Cloudflare Workers DecompressionStream
+async function unzipEntries(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const files = {};
+  let offset = 0;
+  while (offset + 30 < bytes.length) {
+    const sig = view.getUint32(offset, true);
+    if (sig !== 0x04034b50) break;
+    const compMethod = view.getUint16(offset + 8, true);
+    const compSize = view.getUint32(offset + 18, true);
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+    const name = new TextDecoder().decode(bytes.subarray(offset + 30, offset + 30 + nameLen));
+    const dataStart = offset + 30 + nameLen + extraLen;
+    const dataEnd = dataStart + compSize;
+    const raw = bytes.subarray(dataStart, dataEnd);
+    if (compMethod === 0) {
+      files[name] = new TextDecoder().decode(raw);
+    } else if (compMethod === 8) {
+      try {
+        const ds = new DecompressionStream("deflate-raw");
+        const writer = ds.writable.getWriter();
+        writer.write(raw);
+        writer.close();
+        const buf = await new Response(ds.readable).arrayBuffer();
+        files[name] = new TextDecoder().decode(buf);
+      } catch { /* skip corrupt */ }
+    }
+    offset = dataEnd;
+  }
+  return files;
+}
+
+async function extractNumbersFromXlsx(bytes) {
+  const numbersList = [];
+  const seen = new Set();
+  try {
+    const files = await unzipEntries(bytes);
+    const sharedStrings = [];
+    if (files["xl/sharedStrings.xml"]) {
+      const siMatches = files["xl/sharedStrings.xml"].matchAll(/<si[^>]*>([\s\S]*?)<\/si>/g);
+      for (const m of siMatches) {
+        const txt = m[1].replace(/<[^>]+>/g, "");
+        sharedStrings.push(txt);
+      }
+    }
+    for (const [fname, xml] of Object.entries(files)) {
+      if (!fname.startsWith("xl/worksheets/sheet")) continue;
+      const cellMatches = xml.matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/g);
+      for (const cm of cellMatches) {
+        const attrs = cm[1];
+        const inner = cm[2];
+        const vMatch = /<v[^>]*>([\s\S]*?)<\/v>/.exec(inner);
+        if (!vMatch) continue;
+        let val = vMatch[1];
+        if (/t=["']s["']/.test(attrs)) {
+          const idx = parseInt(val, 10);
+          val = sharedStrings[idx] || "";
+        }
+        let valStr = String(val).trim();
+        const cleaned = valStr.replace(/[^\d+]/g, "");
+        if (cleaned.replace(/\+/g, "").length >= 5) {
+          if (!valStr.startsWith("+") && !valStr.startsWith("0")) valStr = "+" + valStr;
+          if (!seen.has(valStr)) { seen.add(valStr); numbersList.push(valStr); }
+        }
+      }
+    }
+  } catch (e) { console.error("XLSX parse error:", e); }
+  return numbersList;
+}
+
+function extractNumbersFromText(text) {
+  const out = [], seen = new Set();
+  for (const line of String(text || "").split(/[\r\n,;]+/)) {
+    let val = line.trim();
+    const cleaned = val.replace(/[^\d+]/g, "");
+    if (cleaned.replace(/\+/g, "").length >= 5) {
+      if (!val.startsWith("+") && !val.startsWith("0")) val = "+" + val;
+      if (!seen.has(val)) { seen.add(val); out.push(val); }
+    }
+  }
+  return out;
+}
+
+function extractOtpCode(text, candNumbers = null) {
+  if (!text) return null;
+  const skip = new Set();
+  if (candNumbers) {
+    for (const cn of candNumbers) {
+      const cl = String(cn).replace(/[^\d]/g, "");
+      if (cl) { skip.add(cl); if (cl.length >= 6) skip.add(cl.slice(-6)); if (cl.length >= 4) skip.add(cl.slice(-4)); }
+    }
+  }
+  for (const pat of OTP_PATTERNS) {
+    const m = pat.exec(text);
+    if (m && m[1]) {
+      const code = m[1].replace(/[^\d]/g, "");
+      if (code.length >= 4 && code.length <= 8 && !skip.has(code)) return code;
+    }
+  }
+  return null;
+}
+
+function extractNumberCandidates(text) {
+  if (!text) return [];
+  const cands = [], seen = new Set();
+  for (const pat of NUMBER_PATTERNS) {
+    for (const m of text.matchAll(new RegExp(pat.source, pat.flags.includes("g") ? pat.flags : pat.flags + "g"))) {
+      const raw = (m[1] || m[0] || "").trim();
+      if (raw.replace(/[^\d]/g, "").length >= 4 && !seen.has(raw)) { seen.add(raw); cands.push(raw); }
+    }
+  }
+  return cands;
+}
+
+function extractSmsBody(rawText) {
+  if (!rawText) return "";
+  for (const line of String(rawText).split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
+    if (/(?:code|otp|verification|pin|facebook|whatsapp|telegram|google|instagram|tiktok)/i.test(line) && /\d{4,8}/.test(line)) return line;
+  }
+  return rawText.slice(0, 300);
+}
+
+function isSuperAdmin(userId, env) { return userId != null && String(userId) === String(env.ADMIN_ID || "5806585314").trim(); }
+function isAdminUser(userId, env, walletConfig) { return userId != null && (isSuperAdmin(userId, env) || String(userId) in (walletConfig?.sub_admins || {})); }
+function hasPermission(userId, perm, env, walletConfig) {
+  if (isSuperAdmin(userId, env)) return true;
+  const perms = walletConfig?.sub_admins?.[String(userId)]?.permissions || [];
+  return perms.includes(perm) || perms.includes("all");
+}
+
+// ============ 3. TELEGRAM API WRAPPER & BUTTONS ============
+function autoClassifyButtonStyle(text, cb = null) {
+  if (!text) return "primary";
+  const tStr = String(text), tLow = tStr.toLowerCase(), cLow = String(cb || "").toLowerCase();
+  const danger = ["🔙", "❌", "🗑", "⛔", "🚫", "🔴", "back", "cancel", "delete", "remove", "reject", "ban", "clear", "reset", "close", "off", "disable", "noop", "no numbers", "পিছনে", "বাতিল", "মুছুন", "বন্ধ"];
+  if (danger.some((i) => tLow.includes(i) || tStr.includes(i))) return "danger";
+  if (["_del", "del_", "_back", "back_", "cancel", "_remove", "remove_", "_reject", "reject_", "_ban", "_clear", "noop"].some((i) => cLow.includes(i))) return "danger";
+  const cleanNum = tStr.replace(/[^\d+]/g, "");
+  if (cleanNum.startsWith("+") || (/^\d+$/.test(cleanNum) && cleanNum.length >= 7)) return "success";
+  const success = ["✅", "🟢", "🎁", "💵", "💰", "➕", "confirm", "claim", "approve", "accept", "save", "add", "create", "withdraw", "get number", "pay", "enable", "start", "yes", "নিশ্চিত", "ক্লেইম", "উত্তোলন", "𝐆𝐞𝐭 𝐍𝐮𝐦𝐛𝐞𝐫"];
+  if (success.some((i) => tLow.includes(i) || tStr.includes(i))) return "success";
+  if (["confirm", "claim", "approve", "save", "withdraw", "get_", "add_", "check_join"].some((i) => cLow.includes(i))) return "success";
+  return "primary";
+}
+
+function btn(text, opts = {}) {
+  const b = { text: String(text), style: opts.style || autoClassifyButtonStyle(text, opts.callback_data) };
+  if (opts.callback_data !== undefined) b.callback_data = String(opts.callback_data);
+  if (opts.url !== undefined) b.url = String(opts.url);
+  if (opts.copy_text !== undefined) b.copy_text = typeof opts.copy_text === "string" ? { text: opts.copy_text } : opts.copy_text;
+  if (opts.icon_custom_emoji_id) b.icon_custom_emoji_id = String(opts.icon_custom_emoji_id);
+  return b;
+}
+function ikb(rows) { return { inline_keyboard: rows }; }
+function rkb(rows) { return { keyboard: rows.map((r) => r.map((x) => typeof x === "string" ? { text: x } : x)), resize_keyboard: true }; }
+
+class TelegramAPI {
+  constructor(token) { this.token = token; this.baseUrl = `https://api.telegram.org/bot${token}`; }
+  async call(method, payload = {}) {
+    const res = await fetch(`${this.baseUrl}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    return res.json().catch(() => ({ ok: false }));
+  }
+  sendMessage(chatId, text, opts = {}) {
+    return this.call("sendMessage", { chat_id: chatId, text: String(text), parse_mode: opts.parse_mode ?? "HTML", ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}), ...(opts.disable_web_page_preview ? { disable_web_page_preview: true } : {}) });
+  }
+  editMessageText(chatId, messageId, text, opts = {}) {
+    return this.call("editMessageText", { chat_id: chatId, message_id: messageId, text: String(text), parse_mode: opts.parse_mode ?? "HTML", ...(opts.reply_markup ? { reply_markup: opts.reply_markup } : {}) });
+  }
+  async safeEditMessage(chatId, messageId, text, replyMarkup = null, parseMode = "HTML") {
+    const res = await this.editMessageText(chatId, messageId, text, { reply_markup: replyMarkup, parse_mode: parseMode });
+    if (!res.ok) {
+      const d = (res.description || "").toLowerCase();
+      if (d.includes("not modified")) return res;
+      if (d.includes("no text") || d.includes("can't be edited")) return this.sendMessage(chatId, text, { reply_markup: replyMarkup, parse_mode: parseMode });
+    }
+    return res;
+  }
+  deleteMessage(chatId, messageId) { return this.call("deleteMessage", { chat_id: chatId, message_id: messageId }); }
+  answerCallbackQuery(id, text = null) { return this.call("answerCallbackQuery", { callback_query_id: id, ...(text ? { text: String(text).slice(0, 200) } : {}) }); }
+  getChatMember(chatId, userId) { return this.call("getChatMember", { chat_id: chatId, user_id: Number(userId) || userId }); }
+  getChat(chatId) { return this.call("getChat", { chat_id: chatId }); }
+  getMe() { return this.call("getMe", {}); }
+  getFile(fileId) { return this.call("getFile", { file_id: fileId }); }
+  async downloadFile(filePath) {
+    const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  async sendDocument(chatId, bytes, filename, caption = "") {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("document", new Blob([bytes]), filename);
+    if (caption) { form.append("caption", caption); form.append("parse_mode", "HTML"); }
+    const res = await fetch(`${this.baseUrl}/sendDocument`, { method: "POST", body: form });
+    return res.json().catch(() => ({ ok: false }));
+  }
+  copyMessage(chatId, fromChatId, messageId) { return this.call("copyMessage", { chat_id: chatId, from_chat_id: fromChatId, message_id: messageId }); }
+}
+
+// ============ 4. D1 DATABASE LAYER ============
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, name TEXT DEFAULT '', username TEXT DEFAULT '', joined INTEGER DEFAULT 0, last_seen INTEGER DEFAULT 0, balance REAL DEFAULT 0.0, referred_by TEXT, referral_count INTEGER DEFAULT 0, referral_earnings REAL DEFAULT 0.0, referred_users TEXT DEFAULT '[]', service TEXT DEFAULT 'Facebook', country TEXT DEFAULT '', pending_action TEXT, wallets TEXT DEFAULT '{}', otps TEXT DEFAULT '[]', auto_withdraw_history TEXT DEFAULT '{}', extra TEXT DEFAULT '{}')`,
+  `CREATE TABLE IF NOT EXISTS numbers (id INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL, country_key TEXT NOT NULL, number TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_numbers_svc_country ON numbers(service, country_key, id)`,
+  `CREATE TABLE IF NOT EXISTS sold (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT NOT NULL, clean_number TEXT NOT NULL, service TEXT DEFAULT 'Facebook', country TEXT DEFAULT '', user_id TEXT NOT NULL, ts INTEGER NOT NULL, expires_at INTEGER, last_6 TEXT, last_4 TEXT, last_3 TEXT)`,
+  `CREATE INDEX IF NOT EXISTS idx_sold_clean ON sold(clean_number)`,
+  `CREATE INDEX IF NOT EXISTS idx_sold_last6 ON sold(last_6)`,
+  `CREATE INDEX IF NOT EXISTS idx_sold_last4 ON sold(last_4)`,
+  `CREATE INDEX IF NOT EXISTS idx_sold_user_exp ON sold(user_id, expires_at)`,
+  `CREATE TABLE IF NOT EXISTS otp_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, country TEXT, service TEXT, user_id TEXT, inbox INTEGER DEFAULT 0, number TEXT, code TEXT, sms TEXT, digits INTEGER DEFAULT 0, lang TEXT, duplicate INTEGER DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS idx_otp_events_ts ON otp_events(ts)`,
+  `CREATE TABLE IF NOT EXISTS withdrawals (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, method TEXT, amount REAL DEFAULT 0.0, account TEXT, status TEXT, ts INTEGER, type TEXT, extra TEXT DEFAULT '{}')`,
+  `CREATE TABLE IF NOT EXISTS filtered_numbers (clean TEXT PRIMARY KEY, number TEXT, ts INTEGER, service TEXT, country TEXT, code TEXT)`,
+  `CREATE TABLE IF NOT EXISTS seen_api_msgs (msg_key TEXT PRIMARY KEY, ts INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS support_map (msg_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, ts INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER DEFAULT 0)`,
+];
+
+class BotDB {
+  constructor(d1) { this.d1 = d1; this._cache = new Map(); }
+  async initSchema() {
+    for (const sql of SCHEMA_STATEMENTS) await this.d1.prepare(sql).run();
+  }
+  async getKV(key, fallback = null) {
+    if (this._cache.has(key)) return this._cache.get(key);
+    const row = await this.d1.prepare("SELECT value FROM kv_store WHERE key = ?").bind(key).first();
+    if (!row) {
+      if (fallback !== null) { const c = JSON.parse(JSON.stringify(fallback)); this._cache.set(key, c); return c; }
+      return null;
+    }
+    try { const p = JSON.parse(row.value); this._cache.set(key, p); return p; } catch { return fallback; }
+  }
+  async setKV(key, val) {
+    this._cache.set(key, val);
+    await this.d1.prepare("INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").bind(key, JSON.stringify(val), nowTs()).run();
+  }
+  async getWalletConfig() {
+    const cfg = await this.getKV("wallet_config", DEFAULT_WALLET_CONFIG);
+    for (const [k, v] of Object.entries(DEFAULT_WALLET_CONFIG)) if (cfg[k] === undefined) cfg[k] = JSON.parse(JSON.stringify(v));
+    return cfg;
+  }
+  saveWalletConfig(cfg) { return this.setKV("wallet_config", cfg); }
+  getPlatforms() { return this.getKV("platforms", DEFAULT_PLATFORMS); }
+  savePlatforms(p) { return this.setKV("platforms", p); }
+  getProviders() { return this.getKV("providers", ["RX SMS"]); }
+  saveProviders(p) { return this.setKV("providers", p); }
+  async getLeaderboard() {
+    const lb = await this.getKV("leaderboard", DEFAULT_LEADERBOARD);
+    if (!lb.daily_stats) lb.daily_stats = {};
+    if (!lb.history) lb.history = {};
+    if (!lb.claims) lb.claims = {};
+    if (!lb.settings) lb.settings = JSON.parse(JSON.stringify(DEFAULT_LEADERBOARD.settings));
+    return lb;
+  }
+  saveLeaderboard(lb) { return this.setKV("leaderboard", lb); }
+
+  _rowToUser(row) {
+    if (!row) return null;
+    const extra = JSON.parse(row.extra || "{}");
+    return {
+      ...extra, uid: row.uid, name: row.name || "", username: row.username || "",
+      joined: row.joined || 0, last_seen: row.last_seen || 0, balance: Number(row.balance || 0),
+      referred_by: row.referred_by || null, referral_count: Number(row.referral_count || 0),
+      referral_earnings: Number(row.referral_earnings || 0), referred_users: JSON.parse(row.referred_users || "[]"),
+      service: row.service || "Facebook", country: row.country || "",
+      pending_action: row.pending_action ? JSON.parse(row.pending_action) : null,
+      wallets: JSON.parse(row.wallets || "{}"), otps: JSON.parse(row.otps || "{}"),
+      auto_withdraw_history: JSON.parse(row.auto_withdraw_history || "{}"),
+    };
+  }
+  async getUser(uid) { return this._rowToUser(await this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(String(uid)).first()); }
+  async saveUser(uid, u) {
+    const known = new Set(["uid", "name", "username", "joined", "last_seen", "balance", "referred_by", "referral_count", "referral_earnings", "referred_users", "service", "country", "pending_action", "wallets", "otps", "auto_withdraw_history"]);
+    const extra = {};
+    for (const [k, v] of Object.entries(u)) if (!known.has(k)) extra[k] = v;
+    await this.d1.prepare(`INSERT INTO users (uid, name, username, joined, last_seen, balance, referred_by, referral_count, referral_earnings, referred_users, service, country, pending_action, wallets, otps, auto_withdraw_history, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET name=excluded.name, username=excluded.username, joined=excluded.joined, last_seen=excluded.last_seen, balance=excluded.balance, referred_by=excluded.referred_by, referral_count=excluded.referral_count, referral_earnings=excluded.referral_earnings, referred_users=excluded.referred_users, service=excluded.service, country=excluded.country, pending_action=excluded.pending_action, wallets=excluded.wallets, otps=excluded.otps, auto_withdraw_history=excluded.auto_withdraw_history, extra=excluded.extra`)
+      .bind(String(uid), u.name || "", u.username || "", u.joined || 0, u.last_seen || 0, Number(u.balance || 0), u.referred_by ? String(u.referred_by) : null, Number(u.referral_count || 0), Number(u.referral_earnings || 0), JSON.stringify(u.referred_users || []), u.service || "Facebook", u.country || "", u.pending_action ? JSON.stringify(u.pending_action) : null, JSON.stringify(u.wallets || {}), JSON.stringify(u.otps || {}), JSON.stringify(u.auto_withdraw_history || {}), JSON.stringify(extra)).run();
+  }
+  async getAllUsers() { const { results } = await this.d1.prepare("SELECT * FROM users").all(); const m = {}; for (const r of results || []) m[r.uid] = this._rowToUser(r); return m; }
+  async getAllUserIds() { const { results } = await this.d1.prepare("SELECT uid FROM users").all(); return (results || []).map((r) => r.uid); }
+  async countUsers() { const r = await this.d1.prepare("SELECT COUNT(*) as cnt FROM users").first(); return r ? r.cnt : 0; }
+  async findUsers(query) {
+    const q = `%${query.replace(/^@/, "").toLowerCase()}%`;
+    const { results } = await this.d1.prepare("SELECT * FROM users WHERE uid = ? OR LOWER(username) LIKE ? OR LOWER(name) LIKE ? LIMIT 20").bind(query, q, q).all();
+    return (results || []).map((r) => this._rowToUser(r));
+  }
+
+  async getCountryCounts(svc) {
+    const { results } = await this.d1.prepare("SELECT country_key, COUNT(*) as cnt FROM numbers WHERE service = ? GROUP BY country_key").bind(svc).all();
+    const out = {}; for (const r of results || []) out[r.country_key] = r.cnt; return out;
+  }
+  async getAllNumbersSummary() {
+    const { results } = await this.d1.prepare("SELECT service, country_key, COUNT(*) as cnt FROM numbers GROUP BY service, country_key").all();
+    const out = {}; for (const r of results || []) { if (!out[r.service]) out[r.service] = {}; out[r.service][r.country_key] = r.cnt; } return out;
+  }
+  async getNumbersList(svc, cKey, limit = 1) {
+    const { results } = await this.d1.prepare("SELECT number FROM numbers WHERE service = ? AND country_key = ? ORDER BY id ASC LIMIT ?").bind(svc, cKey, limit).all();
+    return (results || []).map((r) => r.number);
+  }
+  async popNumbers(svc, cKey, count) {
+    const { results } = await this.d1.prepare("SELECT id, number FROM numbers WHERE service = ? AND country_key = ? ORDER BY id ASC LIMIT ?").bind(svc, cKey, count).all();
+    if (!results || !results.length) return [];
+    const ids = results.map((r) => r.id);
+    await this.d1.prepare(`DELETE FROM numbers WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run();
+    return results.map((r) => r.number);
+  }
+  async addNumbers(svc, cKey, list) {
+    if (!list?.length) return 0;
+    const stmt = this.d1.prepare("INSERT INTO numbers (service, country_key, number) VALUES (?, ?, ?)");
+    for (let i = 0; i < list.length; i += 80) await this.d1.batch(list.slice(i, i + 80).map((n) => stmt.bind(svc, cKey, n)));
+    return list.length;
+  }
+  async removeNumbersByCountry(svc, cKey) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ? AND country_key = ?").bind(svc, cKey).run(); return r.meta?.changes || 0; }
+  async removeNumbersByService(svc) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ?").bind(svc).run(); return r.meta?.changes || 0; }
+  async removeNumbersByCleanList(cleanSet) {
+    if (!cleanSet?.size) return 0;
+    const { results } = await this.d1.prepare("SELECT id, number FROM numbers").all();
+    const del = (results || []).filter((r) => cleanSet.has(String(r.number).replace(/[^\d]/g, ""))).map((r) => r.id);
+    for (let i = 0; i < del.length; i += 80) { const c = del.slice(i, i + 80); await this.d1.prepare(`DELETE FROM numbers WHERE id IN (${c.map(() => "?").join(",")})`).bind(...c).run(); }
+    return del.length;
+  }
+
+  async addSold(item) {
+    const clean = item.clean_number || String(item.number).replace(/[^\d]/g, "");
+    await this.d1.prepare("INSERT INTO sold (number, clean_number, service, country, user_id, ts, expires_at, last_6, last_4, last_3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(item.number, clean, item.service || "Facebook", item.country || "", String(item.user_id), item.ts, item.expires_at || null, clean.slice(-6), clean.slice(-4), clean.slice(-3)).run();
+  }
+  async expireUserNumbers(uid) {
+    const now = nowTs();
+    await this.d1.prepare("UPDATE sold SET expires_at = ? WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?)").bind(now - 1, String(uid), now).run();
+  }
+  async findActiveSoldByCandidates(cands, now) {
+    const cleans = [], l6 = [], l4 = [];
+    for (const c of cands || []) {
+      const cl = String(c).replace(/[^\d]/g, "");
+      if (cl.length >= 6) { cleans.push(cl); if (cl.replace(/^0+/, "")) cleans.push(cl.replace(/^0+/, "")); l6.push(cl.slice(-6)); }
+      if (cl.length >= 4) l4.push(cl.slice(-4));
+    }
+    const map = new Map();
+    if (cleans.length) {
+      const u = [...new Set(cleans)].slice(0, 30);
+      const { results } = await this.d1.prepare(`SELECT * FROM sold WHERE (expires_at IS NULL OR expires_at > ?) AND clean_number IN (${u.map(() => "?").join(",")}) ORDER BY ts DESC`).bind(now, ...u).all();
+      for (const r of results || []) map.set(r.id, r);
+    }
+    if (!map.size && l6.length) {
+      const u = [...new Set(l6)].slice(0, 20);
+      const { results } = await this.d1.prepare(`SELECT * FROM sold WHERE (expires_at IS NULL OR expires_at > ?) AND last_6 IN (${u.map(() => "?").join(",")}) ORDER BY ts DESC`).bind(now, ...u).all();
+      for (const r of results || []) map.set(r.id, r);
+    }
+    if (!map.size && l4.length) {
+      const u = [...new Set(l4)].slice(0, 20);
+      const { results } = await this.d1.prepare(`SELECT * FROM sold WHERE (expires_at IS NULL OR expires_at > ?) AND last_4 IN (${u.map(() => "?").join(",")}) ORDER BY ts DESC`).bind(now, ...u).all();
+      for (const r of results || []) map.set(r.id, r);
+    }
+    return [...map.values()];
+  }
+  cleanupExpiredSold() { const c = nowTs() - 7200; return this.d1.prepare("DELETE FROM sold WHERE expires_at IS NOT NULL AND expires_at < ? AND ts < ?").bind(c, c).run(); }
+
+  addOtpEvent(ev) {
+    return this.d1.prepare("INSERT INTO otp_events (ts, country, service, user_id, inbox, number, code, sms, digits, lang, duplicate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(ev.ts, ev.country || "", ev.service || "", ev.user_id ? String(ev.user_id) : null, ev.inbox ? 1 : 0, ev.number || "", ev.code || "", ev.sms || "", ev.digits || 0, ev.lang || "", ev.duplicate ? 1 : 0).run();
+  }
+  async getOtpEventsSince(sinceTs, limit = 1000) {
+    const { results } = await this.d1.prepare("SELECT * FROM otp_events WHERE ts >= ? ORDER BY ts DESC LIMIT ?").bind(sinceTs, limit).all();
+    return results || [];
+  }
+  cleanupOldOtpEvents() { return this.d1.prepare("DELETE FROM otp_events WHERE ts < ?").bind(nowTs() - 7 * 86400).run(); }
+
+  addWithdrawal(w) {
+    const { id, user_id, method, amount, account, status, ts, type, ...extra } = w;
+    return this.d1.prepare("INSERT INTO withdrawals (id, user_id, method, amount, account, status, ts, type, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(String(id), String(user_id), method || "", Number(amount || 0), account || "", status || "pending_manual", ts || 0, type || "manual", JSON.stringify(extra)).run();
+  }
+  async getWithdrawal(id) {
+    const r = await this.d1.prepare("SELECT * FROM withdrawals WHERE id = ?").bind(String(id)).first();
+    return r ? { ...JSON.parse(r.extra || "{}"), id: r.id, user_id: r.user_id, method: r.method, amount: r.amount, account: r.account, status: r.status, ts: r.ts, type: r.type } : null;
+  }
+  async updateWithdrawal(id, patch) {
+    const cur = await this.getWithdrawal(id); if (!cur) return null;
+    const u = { ...cur, ...patch };
+    const { id: _i, user_id, method, amount, account, status, ts, type, ...extra } = u;
+    await this.d1.prepare("UPDATE withdrawals SET method=?, amount=?, account=?, status=?, ts=?, type=?, extra=? WHERE id=?").bind(method || "", Number(amount || 0), account || "", status || "", ts || 0, type || "", JSON.stringify(extra), String(id)).run();
+    return u;
+  }
+  async getWithdrawals(status = null, userId = null, limit = 50) {
+    let sql = "SELECT * FROM withdrawals WHERE 1=1"; const b = [];
+    if (status) { sql += " AND status = ?"; b.push(status); }
+    if (userId) { sql += " AND user_id = ?"; b.push(String(userId)); }
+    sql += " ORDER BY ts DESC LIMIT ?"; b.push(limit);
+    const { results } = await this.d1.prepare(sql).bind(...b).all();
+    return (results || []).map((r) => ({ ...JSON.parse(r.extra || "{}"), id: r.id, user_id: r.user_id, method: r.method, amount: r.amount, account: r.account, status: r.status, ts: r.ts, type: r.type }));
+  }
+
+  async isFilteredNumber(clean) { return !!(await this.d1.prepare("SELECT clean FROM filtered_numbers WHERE clean = ?").bind(clean).first()); }
+  addFilteredNumber(e) { return this.d1.prepare("INSERT INTO filtered_numbers (clean, number, ts, service, country, code) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(clean) DO UPDATE SET ts=excluded.ts, code=excluded.code").bind(e.clean, e.number || "", e.ts, e.service || "", e.country || "", e.code || "").run(); }
+  async countFilteredNumbers() { const r = await this.d1.prepare("SELECT COUNT(*) as cnt FROM filtered_numbers").first(); return r ? r.cnt : 0; }
+  clearFilteredNumbers() { return this.d1.prepare("DELETE FROM filtered_numbers").run(); }
+  cleanupFilteredNumbers(hrs) { return hrs > 0 ? this.d1.prepare("DELETE FROM filtered_numbers WHERE ts < ?").bind(nowTs() - hrs * 3600).run() : Promise.resolve(); }
+
+  async isApiMsgSeen(key) { return !!(await this.d1.prepare("SELECT msg_key FROM seen_api_msgs WHERE msg_key = ?").bind(key).first()); }
+  markApiMsgSeen(key) { return this.d1.prepare("INSERT OR IGNORE INTO seen_api_msgs (msg_key, ts) VALUES (?, ?)").bind(key, nowTs()).run(); }
+  cleanupSeenApiMsgs() { return this.d1.prepare("DELETE FROM seen_api_msgs WHERE ts < ?").bind(nowTs() - 86400).run(); }
+
+  setSupportMap(msgId, uid) { return this.d1.prepare("INSERT INTO support_map (msg_id, user_id, ts) VALUES (?, ?, ?) ON CONFLICT(msg_id) DO UPDATE SET user_id=excluded.user_id, ts=excluded.ts").bind(String(msgId), String(uid), nowTs()).run(); }
+  async getSupportMap(msgId) { const r = await this.d1.prepare("SELECT user_id FROM support_map WHERE msg_id = ?").bind(String(msgId)).first(); return r ? r.user_id : null; }
+}
+
+// ============ 5. KEYBOARDS ============
+function mainMenuKb() {
+  return rkb([
+    [{ text: "𝐆𝐞𝐭 𝐍𝐮𝐦𝐛𝐞𝐫", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number }, { text: "𝐋𝐢𝐯𝐞 𝐓𝐫𝐚𝐟𝐟𝐢𝐜", icon_custom_emoji_id: "6084477132254218612" }],
+    [{ text: "𝐖𝐚𝐥𝐥𝐞𝐭", icon_custom_emoji_id: "5190576863226933563" }, { text: "𝐋𝐞𝐚𝐝𝐞𝐫𝐛𝐨𝐚𝐫𝐝", icon_custom_emoji_id: "6266973397922616654" }],
+    [{ text: "𝐒𝐮𝐩𝐩𝐨𝐫𝐭", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro }],
+  ]);
+}
+function servicesKbAvailable(summary, walletConfig, platforms) {
+  const buttons = [];
+  for (const [svc, cmap] of Object.entries(summary || {})) {
+    let total = 0;
+    for (const [c, cnt] of Object.entries(cmap || {})) if (!isServiceCountryHidden(walletConfig, svc, c)) total += cnt;
+    if (total > 0) buttons.push(btn(svc, { callback_data: `svc|${svc}`, icon_custom_emoji_id: getPlatformEmojiId(svc, platforms) || CUSTOM_EMOJIS.mobile }));
+  }
+  const rows = [];
+  if (buttons.length) { for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2)); }
+  else rows.push([btn("No Numbers Available", { callback_data: "noop", icon_custom_emoji_id: CUSTOM_EMOJIS.trash })]);
+  return ikb(rows);
+}
+function countriesKb(svc, cmap, walletConfig) {
+  const buttons = [];
+  for (const c of Object.keys(cmap || {}).sort()) {
+    if (isServiceCountryHidden(walletConfig, svc, c) || !(cmap[c] > 0)) continue;
+    const [dial] = splitCountryProvider(c);
+    const flagEid = FLAG_CUSTOM_EMOJIS[DIAL_TO_ISO[String(dial)] || String(dial).toUpperCase()] || CUSTOM_EMOJIS.globe;
+    buttons.push(btn(getCountryDisplayName(c), { callback_data: `cty|${svc}|${c}`, icon_custom_emoji_id: flagEid }));
+  }
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([btn("Back", { callback_data: "get_number", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+  return ikb(rows);
+}
+function walletViewKb(walletConfig) {
+  const rows = [
+    [btn("💸 Withdraw", { callback_data: "withdraw_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.withdraw, style: "success" }), btn("⚙️ Set Wallet", { callback_data: "set_wallet_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.set_wallet })],
+    [btn("👥 Referral", { callback_data: "referral_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.users }), btn("🔄 Refresh", { callback_data: "refresh_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.refresh })],
+  ];
+  if (walletConfig?.withdraw_tutorial_url) rows.push([btn("📺 Withdraw Tutorial", { url: walletConfig.withdraw_tutorial_url })]);
+  return ikb(rows);
+}
+function adminPanelKb(uid, env, walletConfig) {
+  const isSup = isSuperAdmin(uid, env), rows = [], m = [];
+  if (isSup) rows.push([btn("Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
+  if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
+  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
+  if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
+  if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("Platforms & Providers", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
+  if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) m.push(btn("Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
+  if (isSup || hasPermission(uid, "otp_inbox", env, walletConfig)) m.push(btn("OTP System & Inbox", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_settings }));
+  if (isSup || hasPermission(uid, "control", env, walletConfig)) m.push(btn("System & Security", { callback_data: "adm_menu_system", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }));
+  for (let i = 0; i < m.length; i += 2) rows.push(m.slice(i, i + 2));
+  return ikb(rows);
+}
+
+// ============ 6. CORE SERVICES ============
+async function getChannelTitle(ch, tg) {
+  const c = String(ch || "").trim();
+  if (CHANNEL_TITLE_CACHE[c]) return CHANNEL_TITLE_CACHE[c];
+  try { const r = await tg.getChat(c); if (r.ok && r.result?.title) { CHANNEL_TITLE_CACHE[c] = r.result.title; return r.result.title; } } catch {}
+  return c.replace(/^@/, "");
+}
+async function getUnjoinedChannels(userId, db, tg, env, walletConfig, force = false) {
+  if (isAdminUser(userId, env, walletConfig)) return [];
+  const req = walletConfig.required_channels || DEFAULT_REQUIRED_CHANNELS;
+  if (!req?.length) return [];
+  if (!force) { const u = await db.getUser(userId); if (u?.joined) return []; }
+  const unjoined = [];
+  for (const ch of req) {
+    try {
+      const r = await tg.getChatMember(ch, userId);
+      if (!r.ok || !["member", "administrator", "creator"].includes(r.result?.status)) unjoined.push(ch);
+    } catch { unjoined.push(ch); }
+  }
+  if (!unjoined.length) { const u = await db.getUser(userId); if (u) { u.joined = nowTs(); await db.saveUser(userId, u); } }
+  return unjoined;
+}
+async function ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig) {
+  const unjoined = await getUnjoinedChannels(uid, db, tg, env, walletConfig, false);
+  if (!unjoined.length) return true;
+  const titles = [];
+  for (const ch of unjoined) titles.push(`• ${await getChannelTitle(ch, tg)}`);
+  const rows = [];
+  for (const ch of unjoined) rows.push([btn(`📢 ${await getChannelTitle(ch, tg)}`, { url: `https://t.me/${String(ch).replace(/^@/, "")}` })]);
+  rows.push([btn("I have joined", { callback_data: "check_join", icon_custom_emoji_id: CUSTOM_EMOJIS.check })]);
+  const prompt = `🔒 <b>Access Restricted</b>\n\nYou must join the following channel(s) to use this bot:\n${titles.join("\n")}\n\nPlease click the buttons below, join all channels, then click '✅ I have joined'.`;
+  if (msgId) await tg.safeEditMessage(chatId, msgId, prompt, ikb(rows));
+  else await tg.sendMessage(chatId, prompt, { reply_markup: ikb(rows) });
+  return false;
+}
+
+async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, walletConfig, platforms) {
+  if (isServiceCountryHidden(walletConfig, svc, ccode)) {
+    const notice = `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.trash, "🚫")} Numbers Temporarily Unavailable</b>\n\n${getPlatformEmojiHtml(svc, platforms)} <b>Service:</b> ${svc}\n${getCountryFlagEmoji(ccode)} <b>Country:</b> ${getCountryDisplayName(ccode)}\n\nPlease select another country!</blockquote>`;
+    const kb = ikb([[btn("Select Other Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe })]]);
+    if (msgId) await tg.safeEditMessage(chatId, msgId, notice, kb); else await tg.sendMessage(chatId, notice, { reply_markup: kb });
+    return;
+  }
+  const popped = await db.popNumbers(svc, ccode, getCountryNumberLimit(walletConfig, ccode));
+  if (!popped.length) {
+    const kb = ikb([[btn("Back", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]);
+    const m = `❌ No numbers left for <b>${svc}</b> (${getCountryDisplayName(ccode)}).`;
+    if (msgId) await tg.safeEditMessage(chatId, msgId, m, kb); else await tg.sendMessage(chatId, m, { reply_markup: kb });
+    return;
+  }
+  await db.expireUserNumbers(uid);
+  const now = nowTs(), exp = now + NUMBER_VALIDITY_SECONDS, fullNums = [];
+  for (const raw of popped) {
+    const fmt = formatNumber(raw, ccode);
+    fullNums.push(fmt);
+    await db.addSold({ number: fmt, clean_number: fmt.replace(/[^\d]/g, ""), service: svc, country: ccode, user_id: String(uid), ts: now, expires_at: exp });
+  }
+  const user = await db.getUser(uid);
+  if (user) { user.service = svc; user.country = ccode; user.last_seen = now; await db.saveUser(uid, user); }
+  const rem = await db.getNumbersList(svc, ccode, 1);
+  const [dial] = splitCountryProvider(ccode);
+  const msgHtml = `<blockquote><b>╭──────── ⋆⋅☆⋅⋆ ────────╮</b>\n<b>  ${getCountryFlagEmoji(dial)} ${getCountryDisplayName(ccode)} Fresh Number</b>\n<b>   ${getPlatformEmojiHtml(svc, platforms)} ${svc} • <tg-emoji emoji-id="5978841844673416652">⏳</tg-emoji> ${NUMBER_VALIDITY_SECONDS / 60}M</b>\n<b>   <tg-emoji emoji-id="6282702779341346176">🔄</tg-emoji> Refreshed: ${new Date().toLocaleTimeString("en-US", { hour12: true })}</b>\n<b>╰──────── ⋆⋅☆⋅⋆ ────────╯</b></blockquote>`;
+  const rows = fullNums.map((n) => [btn(n, { copy_text: n, icon_custom_emoji_id: CUSTOM_EMOJIS.number_copy, style: "success" })]);
+  const rowB = [];
+  if (rem.length) rowB.push(btn("Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
+  rowB.push(btn("Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
+  rows.push(rowB);
+  rows.push([btn("OTP Group", { url: "https://t.me/+Nlyujg2sScVhMzc1", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
+  if (msgId) await tg.safeEditMessage(chatId, msgId, msgHtml, ikb(rows)); else await tg.sendMessage(chatId, msgHtml, { reply_markup: ikb(rows) });
+}
+
+function getCycleInfo(ts = null, st = {}) {
+  const now = ts !== null ? ts : nowTs(), d = new Date(now * 1000);
+  const ch = Number(st.cycle_hours || 24);
+  if (st.cycle_type === "hourly" || ch < 24) {
+    const p = Math.max(1, ch) * 3600, b = Math.floor(now / p), rem = Math.max(0, (b + 1) * p - now);
+    return { cycle_key: `${d.toISOString().slice(0, 10)}_b${b}`, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: `${ch}h Cycle` };
+  }
+  const nextM = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000), rem = Math.max(0, nextM - now);
+  return { cycle_key: d.toISOString().slice(0, 10), hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: "Daily (24h)" };
+}
+function calculateUserLevel(lb, uid, dateStr) {
+  const st = lb.settings || {}, reqs = st.requirements || {}, days = Number(reqs.streak_days || 7);
+  const base = /^\d{4}-\d{2}-\d{2}/.test(dateStr) ? new Date(dateStr.slice(0, 10) + "T00:00:00Z") : new Date();
+  const counts = [];
+  for (let i = 0; i < days; i++) counts.push(Number(lb.daily_stats?.[new Date(base.getTime() - i * 86400000).toISOString().slice(0, 10)]?.[String(uid)] || 0));
+  if (counts.every((c) => c >= (reqs.diamond_min || 31))) return "diamond";
+  if (counts.every((c) => c >= (reqs.gold_min || 10))) return "gold";
+  if (counts.every((c) => c >= (reqs.silver_min || 5))) return "silver";
+  return "none";
+}
+async function formatLeaderboardMessage(db, uid) {
+  const lb = await db.getLeaderboard(), st = lb.settings || {}, rates = st.rates || { diamond: 0.3, gold: 0.25, silver: 0.15, none: 0.1 };
+  const names = { diamond: "Diamond", gold: "Gold", silver: "Silver", none: "Regular" };
+  const now = nowTs(), pClaims = Object.values(lb.claims || {}).filter((c) => String(c.user_id) === String(uid) && c.status === "pending" && now <= (c.expires_at || 0));
+  if (st.enabled === false) return ["<blockquote>🏆 <b>TOP OTP LEADERBOARD</b>\n\n⚠️ <i>Paused by Admin.</i></blockquote>", pClaims];
+  const ci = getCycleInfo(now, st), dayStats = lb.daily_stats?.[ci.cycle_key] || {};
+  const sorted = Object.entries(dayStats).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]);
+  const topN = Number(st.top_winners_count || 5), lines = [`<blockquote>🏆 <b>TOP ${topN} OTP LEADERBOARD</b>\n⏳ <b>Resets In:</b> <code>${String(ci.hours_left).padStart(2, "0")}h ${String(ci.mins_left).padStart(2, "0")}m</code> • <i>${ci.label}</i></blockquote>\n`];
+  for (let i = 0; i < Math.min(topN, sorted.length); i++) {
+    const [uId, cnt] = sorted[i], u = await db.getUser(uId), lvl = calculateUserLevel(lb, uId, ci.cycle_key), r = Number(rates[lvl] ?? 0.1);
+    lines.push(`<b>#${i + 1} ${escapeHtml(u?.name || `User_${uId.slice(-4)}`)}</b> — ${cnt} OTPs • ৳${(cnt * r).toFixed(2)} (${names[lvl]})`);
+  }
+  if (!sorted.length) lines.push("<i>No OTP activity in this cycle yet.</i>");
+  const myOtps = dayStats[String(uid)] || 0, myLvl = calculateUserLevel(lb, uid, ci.cycle_key), myRate = Number(rates[myLvl] ?? 0.1);
+  lines.push(`\n<blockquote>👤 <b>YOUR STATS:</b> ${myOtps} OTPs • ৳${(myOtps * myRate).toFixed(2)} (${names[myLvl]})</blockquote>`);
+  return [premiumizeText(lines.join("\n")), pClaims];
+}
+function leaderboardViewKb(pClaims = []) {
+  const rows = pClaims.map((cl) => [btn(`Claim ৳${Number(cl.amount || 0).toFixed(2)} TK Bonus`, { callback_data: `claim_lb|${cl.claim_id}`, icon_custom_emoji_id: CUSTOM_EMOJIS.diamond, style: "success" })]);
+  rows.push([btn("Refresh", { callback_data: "refresh_leaderboard", icon_custom_emoji_id: CUSTOM_EMOJIS.refresh })]);
+  return ikb(rows);
+}
+
+async function getTrafficStats(db, walletConfig) {
+  const mins = Number(walletConfig.live_traffic_minutes || 60), events = await db.getOtpEventsSince(nowTs() - mins * 60, 2000);
+  const cCnt = {}, sCnt = {};
+  for (const ev of events) {
+    if (!ev.inbox) continue;
+    const c = String(ev.country || "unknown"), s = normalizeServiceName(ev.service || "Unknown");
+    if (isServiceCountryHidden(walletConfig, s, c) || isCountryHidden(walletConfig, c)) continue;
+    cCnt[c] = (cCnt[c] || 0) + 1; sCnt[s] = (sCnt[s] || 0) + 1;
+  }
+  const total = Object.values(cCnt).reduce((a, b) => a + b, 0);
+  if (!total) return `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.live_system, "🟢")} Live Traffic Stats (${mins}m)</b>\n<i>No OTP activity currently.</i></blockquote>`;
+  const lines = [`<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.live_system, "🟢")} Live Traffic Stats (${mins}m)</b>\n`, "<b>🌍 By Country:</b>"];
+  for (const [c, cnt] of Object.entries(cCnt).sort((a, b) => b[1] - a[1]).slice(0, 5)) lines.push(`  ${getCountryFlagEmoji(c)} ${getCountryDisplayName(c)}: <b>${((cnt / total) * 100).toFixed(1)}%</b>`);
+  lines.push("\n<b>📱 By Service:</b>");
+  for (const [s, cnt] of Object.entries(sCnt).sort((a, b) => b[1] - a[1]).slice(0, 5)) lines.push(`  ${getPlatformEmojiHtml(s)} ${s}: <b>${((cnt / total) * 100).toFixed(1)}%</b>`);
+  lines.push("</blockquote>");
+  return lines.join("\n");
+}
+
+async function formatWalletMessage(db, uid, walletConfig) {
+  const user = (await db.getUser(uid)) || {}, bal = Number(user.balance || 0), rate = Number(walletConfig.usd_to_bdt_rate || USD_TO_BDT);
+  const wList = Object.entries(walletConfig.withdraw_methods || {}).map(([m, d]) => `${tgEmoji(d.emoji_id || CUSTOM_EMOJIS.set_wallet, "📱")} <b>${escapeHtml(m)}:</b> ${user.wallets?.[m] ? `<code>${escapeHtml(user.wallets[m])}</code> ✅` : "<i>Not Set</i> ⚠️"}`);
+  const recent = await db.getWithdrawals(null, uid, 5);
+  const hLines = recent.map((w) => `• <b>৳${Number(w.amount).toFixed(2)}</b> via ${escapeHtml(w.method)} [<b>${w.status}</b>]`);
+  return `<blockquote>${tgEmoji(CUSTOM_EMOJIS.wallet, "💰")} <b>YOUR WALLET</b>\n👤 ${escapeHtml(user.name || uid)} (<code>${uid}</code>)</blockquote>\n\n💵 <b>Balance:</b> <b>৳${bal.toFixed(2)} BDT</b> (<code>$${(bal / rate).toFixed(3)}</code>)\n👥 <b>Referrals:</b> ${user.referral_count || 0} • <b>Earned:</b> ৳${Number(user.referral_earnings || 0).toFixed(2)}\n\n<b>💳 Wallets:</b>\n${wList.join("\n")}\n\n<b>📜 Recent Withdrawals:</b>\n${hLines.length ? hLines.join("\n") : "<i>None yet</i>"}`;
+}
+
+async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, service, otpCode, smsBody = "") {
+  const cleanNum = String(number || "").replace(/[^\d]/g, "");
+  if (!cleanNum) return false;
+  const codeStr = String(otpCode || "N/A").trim() || "N/A", now = nowTs();
+  const matches = await db.findActiveSoldByCandidates([cleanNum, `+${cleanNum}`], now);
+  const matched = matches.find((r) => service !== "Unknown" && normalizeServiceName(r.service) === normalizeServiceName(service)) || matches[0];
+
+  if (walletConfig.number_filter?.enabled && cleanNum.length >= 7 && cleanNum !== codeStr) {
+    await db.addFilteredNumber({ clean: cleanNum, number: cleanNum, ts: now, service, country: matched?.country || "", code: codeStr });
+    await db.removeNumbersByCleanList(new Set([cleanNum]));
+  }
+
+  if (!matched) {
+    const [cc] = extractCountryCode(cleanNum);
+    await db.addOtpEvent({ ts: now, country: cc, service, user_id: "No User", inbox: 0, number: cleanNum, code: codeStr, sms: smsBody });
+    return false;
+  }
+
+  const buyerId = matched.user_id, displayNum = (matched.number || cleanNum).replace(/^\+/, "");
+  const countryCode = matched.country && matched.country !== "unknown" ? matched.country : extractCountryCode(displayNum)[0];
+  const svcName = matched.service && matched.service !== "Unknown" ? matched.service : service;
+  const userData = await db.getUser(buyerId);
+  let dup = false;
+  if (userData) {
+    if (!userData.otps || Array.isArray(userData.otps)) userData.otps = {};
+    const ex = userData.otps[displayNum];
+    dup = codeStr === "N/A" ? Boolean(ex && ex.code === "N/A" && ex.sms === smsBody) : Boolean(ex && ex.code === codeStr);
+    if (!dup) {
+      userData.otps[displayNum] = { code: codeStr, sms: smsBody, time: now };
+      const rate = getRewardRate(walletConfig, svcName, countryCode);
+      userData.balance = Number(((userData.balance || 0) + rate).toFixed(2));
+      await db.saveUser(buyerId, userData);
+      const lb = await db.getLeaderboard(), ck = getCycleInfo(now, lb.settings).cycle_key;
+      if (!lb.daily_stats[ck]) lb.daily_stats[ck] = {};
+      lb.daily_stats[ck][String(buyerId)] = (lb.daily_stats[ck][String(buyerId)] || 0) + 1;
+      await db.saveLeaderboard(lb);
+      if (userData.referred_by && String(userData.referred_by) !== String(buyerId)) {
+        const comm = Number((rate * (Number(walletConfig.referral_percent ?? 10) / 100)).toFixed(4));
+        const refU = await db.getUser(userData.referred_by);
+        if (refU && comm > 0) { refU.balance = Number(((refU.balance || 0) + comm).toFixed(2)); refU.referral_earnings = Number(((refU.referral_earnings || 0) + comm).toFixed(2)); await db.saveUser(userData.referred_by, refU); }
+      }
+    }
+  }
+  await db.addOtpEvent({ ts: now, country: countryCode, service: svcName, user_id: buyerId, inbox: 1, number: displayNum, code: codeStr, sms: smsBody, duplicate: dup });
+  const rate = getRewardRate(walletConfig, svcName, countryCode), [dial] = splitCountryProvider(countryCode);
+  const otpMsg = dup
+    ? `${getCountryFlagEmoji(dial)} <b>${getCountryDisplayName(countryCode)} - ${escapeHtml(svcName)}</b>\n📱 <code>${displayNum}</code>\n<i>⚠️ Duplicate OTP</i>`
+    : `${getCountryFlagEmoji(dial)} <b>${getCountryDisplayName(countryCode)} - ${escapeHtml(svcName)}</b>\n📱 <code>${displayNum}</code>\n${tgEmoji(CUSTOM_EMOJIS.money, "💰")} <b>Earned:</b> +৳${rate.toFixed(2)} BDT`;
+  const btns = [];
+  if (codeStr !== "N/A") btns.push(btn(codeStr, { copy_text: codeStr, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_copy }));
+  if (smsBody) btns.push(btn("Full SMS", { copy_text: smsBody.slice(0, 256), icon_custom_emoji_id: CUSTOM_EMOJIS.clipboard }));
+  await tg.sendMessage(buyerId, otpMsg, { reply_markup: btns.length ? ikb([btns]) : null }).catch(() => {});
+  return true;
+}
+
+async function pollOtpInboxApis(db, tg, walletConfig, platforms, force = false) {
+  const cfg = walletConfig.otp_inbox_api || {};
+  if (!force && !cfg.enabled) return 0;
+  let total = 0;
+  for (const api of cfg.apis || []) {
+    if (!api.enabled || !api.url) continue;
+    try {
+      let url = api.url; const headers = { Accept: "application/json" };
+      if (api.scheme === "bearer") headers.Authorization = `Bearer ${api.token}`;
+      else url += (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(api.token || "")}&records=25`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => null);
+      const rows = Array.isArray(data) ? data : data?.data || data?.records || data?.messages || data?.aaData || [];
+      for (const r of rows) {
+        const num = Array.isArray(r) ? String(r[2] || r[1] || "") : String(r.num || r.number || r.phone || "");
+        const svc = Array.isArray(r) ? String(r[3] || "Unknown") : String(r.cli || r.service || r.app || "Unknown");
+        const sms = Array.isArray(r) ? String(r[4] || "") : String(r.message || r.sms || r.text || "");
+        if (!num || !sms) continue;
+        const key = `${api.id}|${num}|${sms.slice(0, 60)}`;
+        if (await db.isApiMsgSeen(key)) continue;
+        await db.markApiMsgSeen(key);
+        const clean = num.replace(/[^\d]/g, "");
+        if (await deliverVerifiedOtp(db, tg, walletConfig, platforms, clean, normalizeServiceName(svc), extractOtpCode(sms, [clean]) || "N/A", sms)) total++;
+      }
+    } catch {}
+  }
+  return total;
+}
+
+// ============ 7. UPDATE ROUTER (COMMANDS, CALLBACKS, MESSAGES) ============
+async function handleTelegramUpdate(update, env) {
+  const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
+  const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
+
+  if (update.callback_query) {
+    const call = update.callback_query, data = call.data || "", uid = String(call.from.id), chatId = call.message?.chat?.id || uid, msgId = call.message?.message_id;
+    await tg.answerCallbackQuery(call.id).catch(() => {});
+    if (data === "noop") return new Response("OK");
+    if (data === "check_join") {
+      const un = await getUnjoinedChannels(uid, db, tg, env, walletConfig, true);
+      if (un.length) { await ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig); return new Response("OK"); }
+      await tg.deleteMessage(chatId, msgId).catch(() => {});
+      await tg.sendMessage(chatId, "✅ <b>Verified!</b> Welcome to the bot.", { reply_markup: mainMenuKb() });
+      return new Response("OK");
+    }
+    if (!(await ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig))) return new Response("OK");
+    if (data === "get_number") {
+      const sum = await db.getAllNumbersSummary();
+      await tg.safeEditMessage(chatId, msgId, `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.get_number, "📱")} Select a Service</b></blockquote>`, servicesKbAvailable(sum, walletConfig, platforms));
+    } else if (data.startsWith("svc|") || data.startsWith("country_list|")) {
+      const svc = data.split("|")[1], cmap = await db.getCountryCounts(svc);
+      await tg.safeEditMessage(chatId, msgId, `<blockquote><b>${getPlatformEmojiHtml(svc, platforms)} ${escapeHtml(svc)} — Select Country</b></blockquote>`, countriesKb(svc, cmap, walletConfig));
+    } else if (data.startsWith("cty|") || data.startsWith("refresh|")) {
+      const [, svc, cc] = data.split("|");
+      await deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, cc, walletConfig, platforms);
+    } else if (data === "refresh_traffic") {
+      await tg.safeEditMessage(chatId, msgId, await getTrafficStats(db, walletConfig), ikb([[btn("🔄 Refresh Traffic", { callback_data: "refresh_traffic" })], [btn("📱 Get Number", { callback_data: "get_number", style: "success" })]]));
+    } else if (data === "refresh_wallet" || data === "wallet_back") {
+      await tg.safeEditMessage(chatId, msgId, await formatWalletMessage(db, uid, walletConfig), walletViewKb(walletConfig));
+    } else if (data === "set_wallet_menu") {
+      const rows = Object.entries(walletConfig.withdraw_methods || {}).map(([m, d]) => [btn(`Set ${m}`, { callback_data: `set_w|${m}`, icon_custom_emoji_id: d.emoji_id || CUSTOM_EMOJIS.set_wallet })]);
+      rows.push([btn("Back", { callback_data: "wallet_back", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+      await tg.safeEditMessage(chatId, msgId, "⚙️ <b>Select a wallet method:</b>", ikb(rows));
+    } else if (data.startsWith("set_w|")) {
+      const u = await db.getUser(uid); if (u) { u.pending_action = { action: "set_wallet", method: data.split("|")[1] }; await db.saveUser(uid, u); }
+      await tg.sendMessage(chatId, `✏️ Send your <b>${escapeHtml(data.split("|")[1])}</b> wallet/number (or /cancel):`);
+    } else if (data === "withdraw_menu") {
+      if (!walletConfig.withdraw_enabled) { await tg.sendMessage(chatId, "⚠️ Withdrawals are disabled."); return new Response("OK"); }
+      const rows = Object.entries(walletConfig.withdraw_methods || {}).map(([m, d]) => [btn(`${m} (Min ৳${d.min_withdraw || 10})`, { callback_data: `wd_method|${m}`, style: "success" })]);
+      rows.push([btn("Back", { callback_data: "wallet_back", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+      await tg.safeEditMessage(chatId, msgId, "💸 <b>Select Withdrawal Method:</b>", ikb(rows));
+    } else if (data.startsWith("wd_method|")) {
+      const m = data.split("|")[1], u = await db.getUser(uid);
+      if (!u?.wallets?.[m]) { await tg.sendMessage(chatId, `⚠️ Set your <b>${escapeHtml(m)}</b> wallet first!`); return new Response("OK"); }
+      u.pending_action = { action: "withdraw_amount", method: m }; await db.saveUser(uid, u);
+      await tg.sendMessage(chatId, `💸 Enter BDT amount to withdraw via <b>${escapeHtml(m)}</b> (Balance: ৳${Number(u.balance || 0).toFixed(2)}):`);
+    } else if (data === "referral_menu") {
+      const me = await tg.getMe(), uname = me.ok ? me.result.username : "bot", u = (await db.getUser(uid)) || {};
+      const link = `https://t.me/${uname}?start=ref_${uid}`;
+      await tg.safeEditMessage(chatId, msgId, `<blockquote>👥 <b>Referral Link:</b> <code>${link}</code>\n🎁 Commission: <b>${walletConfig.referral_percent ?? 10}%</b>\n👤 Referrals: ${u.referral_count || 0} • Earned: ৳${Number(u.referral_earnings || 0).toFixed(2)}</blockquote>`, ikb([[btn("📋 Copy Link", { copy_text: link, style: "success" })], [btn("Back", { callback_data: "wallet_back", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+    } else if (data === "refresh_leaderboard") {
+      const [txt, pc] = await formatLeaderboardMessage(db, uid);
+      await tg.safeEditMessage(chatId, msgId, txt, leaderboardViewKb(pc));
+    } else if (data.startsWith("claim_lb|")) {
+      const cid = data.split("|")[1], lb = await db.getLeaderboard(), cl = lb.claims?.[cid];
+      if (cl && String(cl.user_id) === uid && cl.status === "pending" && nowTs() <= (cl.expires_at || 0)) {
+        cl.status = "claimed"; await db.saveLeaderboard(lb);
+        const u = await db.getUser(uid); if (u) { u.balance = Number(((u.balance || 0) + Number(cl.amount || 0)).toFixed(2)); await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `🎉 Claimed <b>৳${Number(cl.amount).toFixed(2)} BDT</b>!`);
+      } else await tg.sendMessage(chatId, "⚠️ Claim unavailable or expired.");
+    } else if (data === "start_live_support") {
+      const u = await db.getUser(uid); if (u) { u.pending_action = { action: "live_support" }; await db.saveUser(uid, u); }
+      await tg.sendMessage(chatId, "💬 Send your message for Admin Support (or /cancel):");
+    } else if (isAdminUser(uid, env, walletConfig)) {
+      if (data === "adm_panel") await tg.safeEditMessage(chatId, msgId, "👑 <b>Admin Control Hub</b>", adminPanelKb(uid, env, walletConfig));
+      else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("Stats", { callback_data: "adm_stats" }), btn("Search User", { callback_data: "adm_search_user" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_wallet") await tg.safeEditMessage(chatId, msgId, "💰 <b>Wallet & Withdraw</b>", ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_otp") await tg.safeEditMessage(chatId, msgId, "📥 <b>OTP APIs</b>", ikb([[btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_system") await tg.safeEditMessage(chatId, msgId, "⚙️ <b>System</b>", ikb([[btn("Export Backup", { callback_data: "adm_backup_export" }), btn("Cleanup Now", { callback_data: "adm_cleanup_now", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_add") {
+        const rows = Object.keys(platforms).map((p) => [btn(p, { callback_data: `adm_add_svc|${p}` })]);
+        rows.push([btn("Back", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, "➕ <b>Select Service:</b>", ikb(rows));
+      } else if (data.startsWith("adm_add_svc|")) {
+        const svc = data.split("|")[1], provs = await db.getProviders();
+        const rows = provs.map((p) => [btn(p, { callback_data: `adm_add_prov|${svc}|${p}` })]);
+        rows.push([btn("Default (No Provider)", { callback_data: `adm_add_prov|${svc}|` })]);
+        await tg.safeEditMessage(chatId, msgId, `📦 <b>Select Provider for ${escapeHtml(svc)}:</b>`, ikb(rows));
+      } else if (data.startsWith("adm_add_prov|")) {
+        const [, svc, prov] = data.split("|"), u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "add_numbers_upload", service: svc, provider: prov || "" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `📤 Upload <b>.xlsx / .csv / .txt</b> or paste numbers for <b>${escapeHtml(svc)}</b>:`);
+      } else if (data === "adm_remove") {
+        const sum = await db.getAllNumbersSummary();
+        const rows = Object.keys(sum).map((s) => [btn(s, { callback_data: `adm_rem_svc|${s}` })]);
+        rows.push([btn("Back", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, "🗑️ <b>Select Service:</b>", ikb(rows));
+      } else if (data.startsWith("adm_rem_svc|")) {
+        const svc = data.split("|")[1], cmap = await db.getCountryCounts(svc);
+        const rows = Object.entries(cmap).map(([c, cnt]) => [btn(`${getCountryDisplayName(c)} (${cnt})`, { callback_data: `adm_rem_cty|${svc}|${c}`, style: "danger" })]);
+        rows.push([btn("Back", { callback_data: "adm_remove", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, `🗑️ <b>Remove Country (${escapeHtml(svc)}):</b>`, ikb(rows));
+      } else if (data.startsWith("adm_rem_cty|")) {
+        const [, svc, c] = data.split("|"), rem = await db.removeNumbersByCountry(svc, c);
+        await tg.safeEditMessage(chatId, msgId, `✅ Removed <b>${rem}</b> numbers.`, adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_allremove") {
+        for (const s of Object.keys(platforms)) await db.removeNumbersByService(s);
+        await tg.safeEditMessage(chatId, msgId, "✅ All numbers cleared.", adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_stats") {
+        const totU = await db.countUsers(), sum = await db.getAllNumbersSummary();
+        let totN = 0; for (const cm of Object.values(sum)) for (const c of Object.values(cm)) totN += c;
+        const evs = await db.getOtpEventsSince(nowTs() - 86400, 5000);
+        await tg.safeEditMessage(chatId, msgId, `<blockquote>📊 <b>Stats</b>\n👥 Users: ${totU}\n📱 Numbers: ${totN}\n🔐 OTPs (24h): ${evs.length}</blockquote>`, adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_withdraw_requests") {
+        const list = await db.getWithdrawals("pending_manual", null, 10);
+        if (!list.length) await tg.sendMessage(chatId, "✅ No pending withdrawals.");
+        for (const w of list) await tg.sendMessage(chatId, `💳 <code>${w.id}</code>\n👤 <code>${w.user_id}</code>\n🏦 ${escapeHtml(w.method)}: <code>${escapeHtml(w.account)}</code>\n💰 <b>৳${Number(w.amount).toFixed(2)}</b>`, { reply_markup: ikb([[btn("✅ Approve", { callback_data: `wd_approve|${w.id}`, style: "success" }), btn("❌ Reject", { callback_data: `wd_reject|${w.id}`, style: "danger" })]]) });
+      } else if (data.startsWith("wd_approve|")) {
+        const w = await db.updateWithdrawal(data.split("|")[1], { status: "completed" });
+        if (w) { await tg.sendMessage(w.user_id, `✅ Withdrawal <code>${w.id}</code> (৳${Number(w.amount).toFixed(2)}) approved!`).catch(() => {}); await tg.safeEditMessage(chatId, msgId, `✅ Approved <code>${w.id}</code>`); }
+      } else if (data.startsWith("wd_reject|")) {
+        const w = await db.getWithdrawal(data.split("|")[1]);
+        if (w && w.status === "pending_manual") {
+          await db.updateWithdrawal(w.id, { status: "rejected" });
+          const u = await db.getUser(w.user_id); if (u) { u.balance = Number(((u.balance || 0) + Number(w.amount)).toFixed(2)); await db.saveUser(w.user_id, u); }
+          await tg.sendMessage(w.user_id, `❌ Withdrawal <code>${w.id}</code> rejected & refunded.`).catch(() => {});
+          await tg.safeEditMessage(chatId, msgId, `❌ Rejected <code>${w.id}</code>`);
+        }
+      } else if (data === "adm_rate_settings") {
+        const rows = Object.keys(platforms).map((s) => [btn(`${s} (৳${walletConfig.service_rates?.[s]?.global ?? 0.5})`, { callback_data: `adm_rate_svc|${s}` })]);
+        await tg.safeEditMessage(chatId, msgId, "💵 <b>Select Service:</b>", ikb(rows));
+      } else if (data.startsWith("adm_rate_svc|")) {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_rate", service: data.split("|")[1] }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `💵 Enter new BDT rate for <b>${escapeHtml(data.split("|")[1])}</b>:`);
+      } else if (data === "adm_broadcast") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_broadcast" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "📢 Send message to broadcast to all users (or /cancel):");
+      } else if (data === "adm_search_user") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_search_user" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🔍 Enter User ID or @username:");
+      } else if (data === "adm_otp_api_add") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_otp_api_add" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "📥 Send: <code>Name | URL | Token</code>");
+      } else if (data === "adm_otp_api_poll") {
+        const cnt = await pollOtpInboxApis(db, tg, walletConfig, platforms, true);
+        await tg.sendMessage(chatId, `🔄 Polled APIs. Delivered: <b>${cnt}</b>`);
+      } else if (data === "adm_backup_export") {
+        const bytes = new TextEncoder().encode(JSON.stringify({ exported_at: nowTs(), users: await db.getAllUsers(), wallet_config: walletConfig, platforms }, null, 2));
+        await tg.sendDocument(chatId, bytes, `backup_${nowTs()}.json`, "📦 D1 Backup");
+      } else if (data === "adm_cleanup_now") {
+        await db.cleanupExpiredSold(); await db.cleanupOldOtpEvents(); await db.cleanupSeenApiMsgs();
+        await tg.safeEditMessage(chatId, msgId, "✅ Cleanup done.", adminPanelKb(uid, env, walletConfig));
+      }
+    }
+    return new Response("OK");
+  }
+
+  const msg = update.message || update.channel_post;
+  if (!msg) return new Response("OK");
+  const sourceChatId = String(walletConfig.otp_source_chat_id || env.OTP_SOURCE_CHAT_ID || "-1003888145264");
+  if (String(msg.chat?.id) === sourceChatId) {
+    const txt = msg.text || msg.caption || "";
+    const cands = extractNumberCandidates(txt), code = extractOtpCode(txt, cands), sms = extractSmsBody(txt);
+    const m = /\b(WHATSAPP|TELEGRAM|GOOGLE|FACEBOOK|TIKTOK|INSTAGRAM|IMO)\b/i.exec(txt);
+    const svc = m ? normalizeServiceName(m[1]) : "Unknown";
+    for (const num of cands) if (await deliverVerifiedOtp(db, tg, walletConfig, platforms, num, svc, code || "N/A", sms)) break;
+    return new Response("OK");
+  }
+
+  if (msg.chat?.type !== "private") {
+    if (msg.text?.startsWith("/id")) await tg.sendMessage(msg.chat.id, `🆔 Chat: <code>${msg.chat.id}</code>`);
+    return new Response("OK");
+  }
+
+  const uid = String(msg.from.id), chatId = msg.chat.id, text = (msg.text || "").trim(), adminId = String(env.ADMIN_ID || "5806585314");
+
+  // Commands
+  if (text.startsWith("/")) {
+    const cmd = text.split(/\s+/)[0].split("@")[0].toLowerCase();
+    if (cmd === "/start") {
+      const arg = text.split(/\s+/)[1] || "";
+      if (!(await ensureMembership(uid, chatId, null, db, tg, env, walletConfig))) return new Response("OK");
+      let u = await db.getUser(uid);
+      const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ") || msg.from.username || "User";
+      if (!u) {
+        u = { uid, name, username: msg.from.username || "", joined: nowTs(), last_seen: nowTs(), balance: 0, referred_by: null, referral_count: 0, referral_earnings: 0, referred_users: [], service: "Facebook", country: "", pending_action: null, wallets: {}, otps: {}, auto_withdraw_history: {} };
+        if (arg.startsWith("ref_")) {
+          const rId = arg.slice(4); const rU = await db.getUser(rId);
+          if (rU && rId !== uid) { u.referred_by = rId; rU.referral_count = (rU.referral_count || 0) + 1; await db.saveUser(rId, rU); }
+        }
+        await db.saveUser(uid, u);
+      } else { u.last_seen = nowTs(); u.name = name; await db.saveUser(uid, u); }
+      if (arg.startsWith("d_")) {
+        const p = arg.slice(2), idx = p.indexOf("_");
+        if (idx > 0) { await deliverNumbersToUser(db, tg, chatId, null, uid, normalizeServiceName(p.slice(0, idx)), p.slice(idx + 1), walletConfig, platforms); return new Response("OK"); }
+      }
+      if (isAdminUser(uid, env, walletConfig)) await tg.sendMessage(chatId, "👑 <b>Admin Panel</b>", { reply_markup: adminPanelKb(uid, env, walletConfig) });
+      await tg.sendMessage(chatId, `${tgEmoji("4918354603281482671", "👋")}ʜᴇʟʟᴏ &amp; ᴡᴇʟᴄᴏᴍᴇ <b>${escapeHtml(name)}</b>${tgEmoji("6192529992501437323", "💌")}\n${tgEmoji("6190485871536384315", "📞")}ɢᴇᴛ ꜰʀᴇᴇ ᴠɪʀᴛᴜᴀʟ ɴᴜᴍʙᴇʀꜱ\n${tgEmoji("6190482250878952084", "⚡️")}ꜰᴀꜱᴛ &amp; ꜱɪᴍᴘʟᴇ ꜱᴍꜱ ꜱᴇʀᴠɪᴄᴇ${tgEmoji("6190447113751504647", "✅")}`, { reply_markup: mainMenuKb() });
+      return new Response("OK");
+    }
+    if (cmd === "/admin" && isAdminUser(uid, env, walletConfig)) {
+      await tg.sendMessage(chatId, "👑 <b>Admin Control Hub</b>", { reply_markup: adminPanelKb(uid, env, walletConfig) });
+      return new Response("OK");
+    }
+    if ((cmd === "/testotp" || cmd === "/simotp") && isAdminUser(uid, env, walletConfig)) {
+      const [, num, code, svc = "Facebook"] = text.split(/\s+/);
+      const ok = num && code ? await deliverVerifiedOtp(db, tg, walletConfig, platforms, num, normalizeServiceName(svc), code, `Test OTP: ${code}`) : false;
+      await tg.sendMessage(chatId, ok ? `✅ Delivered ${code} to ${num}` : "⚠️ Usage: /testotp <num> <code> [service]");
+      return new Response("OK");
+    }
+    if (cmd === "/cancel") {
+      const u = await db.getUser(uid); if (u) { u.pending_action = null; await db.saveUser(uid, u); }
+      await tg.sendMessage(chatId, "❌ Cancelled.");
+      return new Response("OK");
+    }
+  }
+
+  // Reply-keyboard buttons
+  if (text.includes("𝐆𝐞𝐭 𝐍𝐮𝐦𝐛𝐞𝐫") || text.toUpperCase().includes("GET NUMBER")) {
+    if (!(await ensureMembership(uid, chatId, null, db, tg, env, walletConfig))) return new Response("OK");
+    await tg.sendMessage(chatId, `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.get_number, "📱")} Select a Service</b></blockquote>`, { reply_markup: servicesKbAvailable(await db.getAllNumbersSummary(), walletConfig, platforms) });
+    return new Response("OK");
+  }
+  if (text.includes("𝐋𝐢𝐯𝐞 𝐓𝐫𝐚𝐟𝐟𝐢𝐜") || text.toUpperCase().includes("LIVE TRAFFIC")) {
+    await tg.sendMessage(chatId, await getTrafficStats(db, walletConfig), { reply_markup: ikb([[btn("🔄 Refresh Traffic", { callback_data: "refresh_traffic" })]]) });
+    return new Response("OK");
+  }
+  if (text.includes("𝐖𝐚𝐥𝐥𝐞𝐭") || text.toUpperCase().includes("WALLET")) {
+    await tg.sendMessage(chatId, await formatWalletMessage(db, uid, walletConfig), { reply_markup: walletViewKb(walletConfig) });
+    return new Response("OK");
+  }
+  if (text.includes("𝐋𝐞𝐚𝐝𝐞𝐫𝐛𝐨𝐚𝐫𝐝") || text.toUpperCase().includes("LEADERBOARD")) {
+    const [t, pc] = await formatLeaderboardMessage(db, uid);
+    await tg.sendMessage(chatId, t, { reply_markup: leaderboardViewKb(pc) });
+    return new Response("OK");
+  }
+  if (text.includes("𝐒𝐮𝐩𝐩𝐨𝐫𝐭") || text.toUpperCase().includes("SUPPORT")) {
+    await tg.sendMessage(chatId, `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.support_pro, "❓")} Help & Support</b></blockquote>`, { reply_markup: ikb([[btn("💬 Live Support Chat", { callback_data: "start_live_support", style: "success" })], [btn("📢 Main Channel", { url: "https://t.me/ROXYSMSNEWS" })]]) });
+    return new Response("OK");
+  }
+
+  // Admin live support reply
+  if (isAdminUser(uid, env, walletConfig) && msg.reply_to_message) {
+    const target = await db.getSupportMap(msg.reply_to_message.message_id);
+    if (target) {
+      if (msg.text) await tg.sendMessage(target, `💬 <b>Admin Reply:</b>\n\n${escapeHtml(msg.text)}`);
+      else await tg.copyMessage(target, chatId, msg.message_id);
+      await tg.sendMessage(chatId, `✅ Reply sent to <code>${target}</code>`);
+      return new Response("OK");
+    }
+  }
+
+  // Pending actions & file upload
+  const u = await db.getUser(uid), pa = u?.pending_action;
+  if (!pa) return new Response("OK");
+
+  if (msg.document && pa.action === "add_numbers_upload" && isAdminUser(uid, env, walletConfig)) {
+    const f = await tg.getFile(msg.document.file_id);
+    if (f.ok) {
+      const bytes = await tg.downloadFile(f.result.file_path), fname = (msg.document.file_name || "").toLowerCase();
+      const parsed = fname.endsWith(".xlsx") ? await extractNumbersFromXlsx(bytes) : extractNumbersFromText(new TextDecoder().decode(bytes));
+      const grouped = {}; let added = 0;
+      for (const n of parsed) {
+        const cl = n.replace(/[^\d]/g, "");
+        if (walletConfig.number_filter?.enabled && (await db.isFilteredNumber(cl))) continue;
+        const [cc] = extractCountryCode(n), ck = makeCountryProviderKey(cc, pa.provider || "");
+        if (!grouped[ck]) grouped[ck] = []; grouped[ck].push(n);
+      }
+      for (const [ck, list] of Object.entries(grouped)) added += await db.addNumbers(pa.service, ck, list);
+      u.pending_action = null; await db.saveUser(uid, u);
+      await tg.sendMessage(chatId, `✅ Added <b>${added}</b> numbers to <b>${escapeHtml(pa.service)}</b>!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+    }
+    return new Response("OK");
+  }
+
+  if (pa.action === "add_numbers_upload" && text && isAdminUser(uid, env, walletConfig)) {
+    const parsed = extractNumbersFromText(text), grouped = {}; let added = 0;
+    for (const n of parsed) {
+      const [cc] = extractCountryCode(n), ck = makeCountryProviderKey(cc, pa.provider || "");
+      if (!grouped[ck]) grouped[ck] = []; grouped[ck].push(n);
+    }
+    for (const [ck, list] of Object.entries(grouped)) added += await db.addNumbers(pa.service, ck, list);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Added <b>${added}</b> numbers to <b>${escapeHtml(pa.service)}</b>!`);
+  } else if (pa.action === "live_support") {
+    const fwd = await tg.sendMessage(adminId, `📩 <b>Support</b> from ${escapeHtml(u.name)} (<code>${uid}</code>):\n\n${escapeHtml(text || "[Media]")}`);
+    if (fwd.ok) await db.setSupportMap(fwd.result.message_id, uid);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, "✅ Sent to Admin!");
+  } else if (pa.action === "set_wallet") {
+    if (!u.wallets) u.wallets = {}; u.wallets[pa.method] = text; u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Saved <b>${escapeHtml(pa.method)}</b>: <code>${escapeHtml(text)}</code>`);
+  } else if (pa.action === "withdraw_amount") {
+    const amt = parseFloat(text), minW = Number(walletConfig.withdraw_methods?.[pa.method]?.min_withdraw ?? 10);
+    if (isNaN(amt) || amt < minW || amt > u.balance) { await tg.sendMessage(chatId, `❌ Invalid amount (Min ৳${minW}, Balance ৳${u.balance.toFixed(2)}).`); return new Response("OK"); }
+    u.balance = Number((u.balance - amt).toFixed(2)); u.pending_action = null; await db.saveUser(uid, u);
+    const wId = `W${nowTs()}${Math.floor(Math.random() * 900 + 100)}`;
+    await db.addWithdrawal({ id: wId, user_id: uid, method: pa.method, amount: amt, account: u.wallets[pa.method], status: "pending_manual", ts: nowTs(), type: "manual" });
+    await tg.sendMessage(adminId, `💳 <b>Withdraw</b> <code>${wId}</code>\n👤 <code>${uid}</code>\n🏦 ${escapeHtml(pa.method)}: <code>${escapeHtml(u.wallets[pa.method])}</code>\n💰 ৳${amt.toFixed(2)}`, { reply_markup: ikb([[btn("✅ Approve", { callback_data: `wd_approve|${wId}`, style: "success" }), btn("❌ Reject", { callback_data: `wd_reject|${wId}`, style: "danger" })]]) });
+    await tg.sendMessage(chatId, `✅ Request <code>${wId}</code> submitted!`);
+  } else if (pa.action === "adm_set_rate" && isAdminUser(uid, env, walletConfig)) {
+    const val = parseFloat(text);
+    if (!isNaN(val) && val >= 0) {
+      if (!walletConfig.service_rates[pa.service]) walletConfig.service_rates[pa.service] = { global: val, country: {} };
+      else walletConfig.service_rates[pa.service].global = val;
+      await db.saveWalletConfig(walletConfig);
+      u.pending_action = null; await db.saveUser(uid, u);
+      await tg.sendMessage(chatId, `✅ Rate for <b>${escapeHtml(pa.service)}</b> set to ৳${val.toFixed(2)}`);
+    }
+  } else if (pa.action === "adm_search_user" && isAdminUser(uid, env, walletConfig)) {
+    const found = await db.findUsers(text); u.pending_action = null; await db.saveUser(uid, u);
+    if (!found.length) await tg.sendMessage(chatId, "❌ Not found.");
+    else await tg.sendMessage(chatId, `👤 ${escapeHtml(found[0].name)} (<code>${found[0].uid}</code>)\n💰 ৳${Number(found[0].balance).toFixed(2)}`);
+  } else if (pa.action === "adm_otp_api_add" && isAdminUser(uid, env, walletConfig)) {
+    const [name, url, token = ""] = text.split("|").map((s) => s.trim());
+    if (name && url) {
+      walletConfig.otp_inbox_api.apis.push({ id: `api_${nowTs()}`, name, url, token, scheme: "param_token", enabled: true });
+      await db.saveWalletConfig(walletConfig); u.pending_action = null; await db.saveUser(uid, u);
+      await tg.sendMessage(chatId, `✅ API <b>${escapeHtml(name)}</b> added!`);
+    }
+  } else if (pa.action === "adm_broadcast" && isAdminUser(uid, env, walletConfig)) {
+    u.pending_action = null; await db.saveUser(uid, u);
+    const ids = await db.getAllUserIds(); let sent = 0;
+    for (let i = 0; i < ids.length; i += 20) await Promise.all(ids.slice(i, i + 20).map(async (id) => { if ((await tg.copyMessage(id, chatId, msg.message_id)).ok) sent++; }));
+    await tg.sendMessage(chatId, `📢 Broadcast sent to <b>${sent}/${ids.length}</b> users.`);
+  }
+  return new Response("OK");
+}
+
+// ============ 8. CLOUDFLARE PAGES ENTRY POINT (_worker.js) ============
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (path === "/health") {
+      return new Response(JSON.stringify({ ok: true, mode: "single-file-pages-d1" }), { headers: { "Content-Type": "application/json" } });
+    }
+
+    if (path === "/setup") {
+      const secret = url.searchParams.get("secret") || "";
+      if (env.CRON_SECRET && secret !== env.CRON_SECRET) return new Response("Unauthorized", { status: 401 });
+      if (!env.DB) return new Response("D1 binding 'DB' not found!", { status: 500 });
+      await new BotDB(env.DB).initSchema();
+      return new Response(JSON.stringify({ ok: true, message: "D1 tables initialized!" }), { headers: { "Content-Type": "application/json" } });
+    }
+
+    if (path === "/cron") {
+      const secret = url.searchParams.get("secret") || "";
+      if (env.CRON_SECRET && secret !== env.CRON_SECRET) return new Response("Unauthorized", { status: 401 });
+      const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
+      const polled = await pollOtpInboxApis(db, tg, await db.getWalletConfig(), await db.getPlatforms(), false);
+      await db.cleanupExpiredSold(); await db.cleanupSeenApiMsgs();
+      return new Response(JSON.stringify({ ok: true, polled }), { headers: { "Content-Type": "application/json" } });
+    }
+
+    if (request.method === "POST" && (path === "/webhook" || path === "/telegram-webhook" || path === "/")) {
+      if (!env.BOT_TOKEN || !env.DB) return new Response("Missing BOT_TOKEN or DB binding", { status: 500 });
+      try {
+        return await handleTelegramUpdate(await request.json(), env);
+      } catch (e) {
+        return new Response("Error: " + e.message, { status: 500 });
+      }
+    }
+
+    return new Response(
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><title>SMS Bot</title></head><body style="font-family:sans-serif;background:#0f172a;color:#e2e8f0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0"><div style="background:#1e293b;padding:2rem;border-radius:12px;text-align:center"><h2 style="color:#38bdf8;margin-top:0">Telegram SMS Bot Online</h2><p>Running on Cloudflare Pages (_worker.js) + D1</p></div></body></html>`,
+      { headers: { "Content-Type": "text/html; charset=utf-8" } }
+    );
+  },
+};
