@@ -320,6 +320,15 @@ function getCountryDisplayName(key) {
   const clean = cname.split("/")[0].replace(/[^a-zA-Z\s/]/g, "").trim() || ccode;
   return prov ? `${clean} ${prov}` : clean;
 }
+function getCountryFlagUnicode(key) {
+  const [ccode] = splitCountryProvider(key);
+  const cname = COUNTRY_MAP[String(ccode)] || "";
+  const tok = cname.split(" ")[0];
+  return tok && /[^\x00-\x7F]/.test(tok) ? tok : "🏳️";
+}
+function getCountryButtonLabel(key) {
+  return `${getCountryFlagUnicode(key)} ${getCountryDisplayName(key)}`;
+}
 function getCountryFlagEmoji(countryCode) {
   const [dialCode] = splitCountryProvider(countryCode);
   const iso = DIAL_TO_ISO[String(dialCode)] || String(dialCode).toUpperCase();
@@ -626,9 +635,22 @@ const SCHEMA_STATEMENTS = [
 ];
 
 class BotDB {
-  constructor(d1) { this.d1 = d1; this._cache = new Map(); }
+  constructor(d1) { this.d1 = d1; this._cache = new Map(); this._userCache = new Map(); }
   async initSchema() {
     for (const sql of SCHEMA_STATEMENTS) await this.d1.prepare(sql).run();
+  }
+  async preloadCore(uid = null) {
+    const kvPromise = this.d1.prepare("SELECT key, value FROM kv_store WHERE key IN ('wallet_config', 'platforms', 'providers', 'leaderboard')").all();
+    const userPromise = uid ? this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(String(uid)).first() : Promise.resolve(null);
+    const [kvRes, uRow] = await Promise.all([kvPromise, userPromise]);
+    for (const row of kvRes?.results || []) {
+      try { this._cache.set(row.key, JSON.parse(row.value)); } catch {}
+    }
+    if (!this._cache.has("wallet_config")) this._cache.set("wallet_config", JSON.parse(JSON.stringify(DEFAULT_WALLET_CONFIG)));
+    if (!this._cache.has("platforms")) this._cache.set("platforms", JSON.parse(JSON.stringify(DEFAULT_PLATFORMS)));
+    if (!this._cache.has("providers")) this._cache.set("providers", ["RX SMS"]);
+    if (!this._cache.has("leaderboard")) this._cache.set("leaderboard", JSON.parse(JSON.stringify(DEFAULT_LEADERBOARD)));
+    if (uid) this._userCache.set(String(uid), this._rowToUser(uRow));
   }
   async getKV(key, fallback = null) {
     if (this._cache.has(key)) return this._cache.get(key);
@@ -677,8 +699,15 @@ class BotDB {
       auto_withdraw_history: JSON.parse(row.auto_withdraw_history || "{}"),
     };
   }
-  async getUser(uid) { return this._rowToUser(await this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(String(uid)).first()); }
+  async getUser(uid) {
+    const k = String(uid);
+    if (this._userCache.has(k)) return this._userCache.get(k);
+    const u = this._rowToUser(await this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(k).first());
+    this._userCache.set(k, u);
+    return u;
+  }
   async saveUser(uid, u) {
+    this._userCache.set(String(uid), u);
     const known = new Set(["uid", "name", "username", "joined", "last_seen", "balance", "referred_by", "referral_count", "referral_earnings", "referred_users", "service", "country", "pending_action", "wallets", "otps", "auto_withdraw_history"]);
     const extra = {};
     for (const [k, v] of Object.entries(u)) if (!known.has(k)) extra[k] = v;
@@ -733,6 +762,14 @@ class BotDB {
     const clean = item.clean_number || String(item.number).replace(/[^\d]/g, "");
     await this.d1.prepare("INSERT INTO sold (number, clean_number, service, country, user_id, ts, expires_at, last_6, last_4, last_3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(item.number, clean, item.service || "Facebook", item.country || "", String(item.user_id), item.ts, item.expires_at || null, clean.slice(-6), clean.slice(-4), clean.slice(-3)).run();
+  }
+  async addSoldBatch(items) {
+    if (!items?.length) return;
+    const stmt = this.d1.prepare("INSERT INTO sold (number, clean_number, service, country, user_id, ts, expires_at, last_6, last_4, last_3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    await this.d1.batch(items.map((item) => {
+      const clean = item.clean_number || String(item.number).replace(/[^\d]/g, "");
+      return stmt.bind(item.number, clean, item.service || "Facebook", item.country || "", String(item.user_id), item.ts, item.expires_at || null, clean.slice(-6), clean.slice(-4), clean.slice(-3));
+    }));
   }
   async expireUserNumbers(uid) {
     const now = nowTs();
@@ -844,7 +881,7 @@ function countriesKb(svc, cmap, walletConfig) {
     if (isServiceCountryHidden(walletConfig, svc, c) || !(cmap[c] > 0)) continue;
     const [dial] = splitCountryProvider(c);
     const flagEid = FLAG_CUSTOM_EMOJIS[DIAL_TO_ISO[String(dial)] || String(dial).toUpperCase()] || CUSTOM_EMOJIS.globe;
-    buttons.push(btn(getCountryDisplayName(c), { callback_data: `cty|${svc}|${c}`, icon_custom_emoji_id: flagEid }));
+    buttons.push(btn(getCountryButtonLabel(c), { callback_data: `cty|${svc}|${c}`, icon_custom_emoji_id: flagEid }));
   }
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
@@ -866,7 +903,10 @@ function adminPanelKb(uid, env, walletConfig) {
   if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
   if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
   if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("Platforms & Providers", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
-  if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) m.push(btn("Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
+  if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) {
+    m.push(btn("Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
+    m.push(btn("🔒 Force Join Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings }));
+  }
   if (isSup || hasPermission(uid, "otp_inbox", env, walletConfig)) m.push(btn("OTP System & Inbox", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_settings }));
   if (isSup || hasPermission(uid, "control", env, walletConfig)) m.push(btn("System & Security", { callback_data: "adm_menu_system", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }));
   for (let i = 0; i < m.length; i += 2) rows.push(m.slice(i, i + 2));
@@ -910,27 +950,27 @@ async function getUnjoinedChannels(userId, db, tg, env, walletConfig, force = fa
     const u = await db.getUser(userId);
     if (u?.joined && u.joined >= chUpdatedAt) return [];
   }
-  const unjoined = [];
-  for (const ch of req) {
+  const results = await Promise.all(req.map(async (ch) => {
     const entry = parseChannelEntry(ch);
     try {
       const r = await tg.getChatMember(entry.id, userId);
-      if (!r.ok || !["member", "administrator", "creator"].includes(r.result?.status)) unjoined.push(ch);
-    } catch { unjoined.push(ch); }
-  }
+      return (!r.ok || !["member", "administrator", "creator"].includes(r.result?.status)) ? ch : null;
+    } catch { return ch; }
+  }));
+  const unjoined = results.filter(Boolean);
   if (!unjoined.length) { const u = await db.getUser(userId); if (u) { u.joined = nowTs(); await db.saveUser(userId, u); } }
   return unjoined;
 }
 async function ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig) {
   const unjoined = await getUnjoinedChannels(uid, db, tg, env, walletConfig, false);
   if (!unjoined.length) return true;
+  const titleList = await Promise.all(unjoined.map((ch) => getChannelTitle(ch, tg)));
   const titles = [], rows = [];
-  for (const ch of unjoined) {
-    const entry = parseChannelEntry(ch);
-    const title = await getChannelTitle(ch, tg);
+  unjoined.forEach((ch, idx) => {
+    const entry = parseChannelEntry(ch), title = titleList[idx];
     titles.push(`• ${title}`);
     if (entry.url) rows.push([btn(`📢 ${title}`, { url: entry.url })]);
-  }
+  });
   rows.push([btn("I have joined", { callback_data: "check_join", icon_custom_emoji_id: CUSTOM_EMOJIS.check })]);
   const prompt = `🔒 <b>Access Restricted</b>\n\nYou must join the following channel(s)/group(s) to use this bot:\n${titles.join("\n")}\n\nPlease join and click '✅ I have joined' to verify.`;
   if (msgId) await tg.safeEditMessage(chatId, msgId, prompt, ikb(rows));
@@ -938,30 +978,39 @@ async function ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig) {
   return false;
 }
 
-async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, walletConfig, platforms) {
+async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, walletConfig, platforms, ctx = null) {
   if (isServiceCountryHidden(walletConfig, svc, ccode)) {
     const notice = `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.trash, "🚫")} Numbers Temporarily Unavailable</b>\n\n${getPlatformEmojiHtml(svc, platforms)} <b>Service:</b> ${svc}\n${getCountryFlagEmoji(ccode)} <b>Country:</b> ${getCountryDisplayName(ccode)}\n\nPlease select another country!</blockquote>`;
     const kb = ikb([[btn("Select Other Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe })]]);
     if (msgId) await tg.safeEditMessage(chatId, msgId, notice, kb); else await tg.sendMessage(chatId, notice, { reply_markup: kb });
     return;
   }
-  const popped = await db.popNumbers(svc, ccode, getCountryNumberLimit(walletConfig, ccode));
+  const [popped, , user] = await Promise.all([
+    db.popNumbers(svc, ccode, getCountryNumberLimit(walletConfig, ccode)),
+    db.expireUserNumbers(uid),
+    db.getUser(uid),
+  ]);
   if (!popped.length) {
     const kb = ikb([[btn("Back", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]);
     const m = `❌ No numbers left for <b>${svc}</b> (${getCountryDisplayName(ccode)}).`;
     if (msgId) await tg.safeEditMessage(chatId, msgId, m, kb); else await tg.sendMessage(chatId, m, { reply_markup: kb });
     return;
   }
-  await db.expireUserNumbers(uid);
-  const now = nowTs(), exp = now + NUMBER_VALIDITY_SECONDS, fullNums = [];
+  const now = nowTs(), exp = now + NUMBER_VALIDITY_SECONDS, fullNums = [], soldItems = [];
   for (const raw of popped) {
     const fmt = formatNumber(raw, ccode);
     fullNums.push(fmt);
-    await db.addSold({ number: fmt, clean_number: fmt.replace(/[^\d]/g, ""), service: svc, country: ccode, user_id: String(uid), ts: now, expires_at: exp });
+    soldItems.push({ number: fmt, clean_number: fmt.replace(/[^\d]/g, ""), service: svc, country: ccode, user_id: String(uid), ts: now, expires_at: exp });
   }
-  const user = await db.getUser(uid);
-  if (user) { user.service = svc; user.country = ccode; user.last_seen = now; await db.saveUser(uid, user); }
-  const rem = await db.getNumbersList(svc, ccode, 1);
+  const [, rem] = await Promise.all([
+    db.addSoldBatch(soldItems),
+    db.getNumbersList(svc, ccode, 1),
+  ]);
+  if (user) {
+    user.service = svc; user.country = ccode; user.last_seen = now;
+    const saveP = db.saveUser(uid, user);
+    if (ctx?.waitUntil) ctx.waitUntil(saveP); else await saveP;
+  }
   const [dial] = splitCountryProvider(ccode);
   const msgHtml = `<blockquote><b>╭──────── ⋆⋅☆⋅⋆ ────────╮</b>\n<b>  ${getCountryFlagEmoji(dial)} ${getCountryDisplayName(ccode)} Fresh Number</b>\n<b>   ${getPlatformEmojiHtml(svc, platforms)} ${svc} • <tg-emoji emoji-id="5978841844673416652">⏳</tg-emoji> ${NUMBER_VALIDITY_SECONDS / 60}M</b>\n<b>   <tg-emoji emoji-id="6282702779341346176">🔄</tg-emoji> Refreshed: ${new Date().toLocaleTimeString("en-US", { hour12: true })}</b>\n<b>╰──────── ⋆⋅☆⋅⋆ ────────╯</b></blockquote>`;
   const rows = fullNums.map((n) => [btn(n, { copy_text: n, icon_custom_emoji_id: CUSTOM_EMOJIS.number_copy, style: "success" })]);
@@ -969,7 +1018,8 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
   if (rem.length) rowB.push(btn("Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
   rowB.push(btn("Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
   rows.push(rowB);
-  rows.push([btn("OTP Group", { url: "https://t.me/+Nlyujg2sScVhMzc1", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
+  const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
+  rows.push([btn("OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
   if (msgId) await tg.safeEditMessage(chatId, msgId, msgHtml, ikb(rows)); else await tg.sendMessage(chatId, msgHtml, { reply_markup: ikb(rows) });
 }
 
@@ -1129,13 +1179,16 @@ async function pollOtpInboxApis(db, tg, walletConfig, platforms, force = false) 
 }
 
 // ============ 7. UPDATE ROUTER (COMMANDS, CALLBACKS, MESSAGES) ============
-async function handleTelegramUpdate(update, env) {
+async function handleTelegramUpdate(update, env, ctx = null) {
   const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
+  const actorUid = update.callback_query?.from?.id || update.message?.from?.id || null;
+  await db.preloadCore(actorUid);
   const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
 
   if (update.callback_query) {
     const call = update.callback_query, data = call.data || "", uid = String(call.from.id), chatId = call.message?.chat?.id || uid, msgId = call.message?.message_id;
-    await tg.answerCallbackQuery(call.id).catch(() => {});
+    const ackP = tg.answerCallbackQuery(call.id).catch(() => {});
+    if (ctx?.waitUntil) ctx.waitUntil(ackP); else await ackP;
     if (data === "noop") return new Response("OK");
     if (data === "check_join") {
       const un = await getUnjoinedChannels(uid, db, tg, env, walletConfig, true);
@@ -1153,7 +1206,7 @@ async function handleTelegramUpdate(update, env) {
       await tg.safeEditMessage(chatId, msgId, `<blockquote><b>${getPlatformEmojiHtml(svc, platforms)} ${escapeHtml(svc)} — Select Country</b></blockquote>`, countriesKb(svc, cmap, walletConfig));
     } else if (data.startsWith("cty|") || data.startsWith("refresh|")) {
       const [, svc, cc] = data.split("|");
-      await deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, cc, walletConfig, platforms);
+      await deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, cc, walletConfig, platforms, ctx);
     } else if (data === "refresh_traffic") {
       await tg.safeEditMessage(chatId, msgId, await getTrafficStats(db, walletConfig), ikb([[btn("🔄 Refresh Traffic", { callback_data: "refresh_traffic" })], [btn("📱 Get Number", { callback_data: "get_number", style: "success" })]]));
     } else if (data === "refresh_wallet" || data === "wallet_back") {
@@ -1176,7 +1229,11 @@ async function handleTelegramUpdate(update, env) {
       u.pending_action = { action: "withdraw_amount", method: m }; await db.saveUser(uid, u);
       await tg.sendMessage(chatId, `💸 Enter BDT amount to withdraw via <b>${escapeHtml(m)}</b> (Balance: ৳${Number(u.balance || 0).toFixed(2)}):`);
     } else if (data === "referral_menu") {
-      const me = await tg.getMe(), uname = me.ok ? me.result.username : "bot", u = (await db.getUser(uid)) || {};
+      if (!globalThis._botUsername) {
+        const me = await tg.getMe();
+        if (me.ok && me.result?.username) globalThis._botUsername = me.result.username;
+      }
+      const uname = globalThis._botUsername || "bot", u = (await db.getUser(uid)) || {};
       const link = `https://t.me/${uname}?start=ref_${uid}`;
       await tg.safeEditMessage(chatId, msgId, `<blockquote>👥 <b>Referral Link:</b> <code>${link}</code>\n🎁 Commission: <b>${walletConfig.referral_percent ?? 10}%</b>\n👤 Referrals: ${u.referral_count || 0} • Earned: ৳${Number(u.referral_earnings || 0).toFixed(2)}</blockquote>`, ikb([[btn("📋 Copy Link", { copy_text: link, style: "success" })], [btn("Back", { callback_data: "wallet_back", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
     } else if (data === "refresh_leaderboard") {
@@ -1197,7 +1254,10 @@ async function handleTelegramUpdate(update, env) {
       else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("🌍 Manage Countries", { callback_data: "adm_countries_menu" }), btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_countries_menu") {
         const saved = walletConfig.custom_countries || [];
-        const rows = saved.map((c) => [btn(`❌ ${c.name || getCountryDisplayName(c.code)} (+${c.code})`, { callback_data: `adm_del_country|${c.code}`, style: "danger" })]);
+        const rows = saved.map((c) => {
+          const lbl = c.name && /[^\x00-\x7F]/.test(c.name) ? c.name : getCountryButtonLabel(c.code);
+          return [btn(`❌ ${lbl} (+${c.code})`, { callback_data: `adm_del_country|${c.code}`, style: "danger" })];
+        });
         rows.push([btn("➕ Add Country", { callback_data: "adm_add_country", style: "success" })]);
         rows.push([btn("Back", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         const txt = saved.length ? `🌍 <b>Saved Countries (${saved.length})</b>\nSelect to remove or add a new country:` : "🌍 <b>Saved Countries</b>\n<i>No custom countries saved yet. Add one below!</i>";
@@ -1239,7 +1299,23 @@ async function handleTelegramUpdate(update, env) {
         await db.saveWalletConfig(walletConfig);
         await tg.safeEditMessage(chatId, msgId, "✅ All required channels cleared (Force Join disabled).", adminPanelKb(uid, env, walletConfig));
       }
-      else if (data === "adm_menu_otp") await tg.safeEditMessage(chatId, msgId, "📥 <b>OTP APIs</b>", ikb([[btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_otp") await tg.safeEditMessage(chatId, msgId, "📥 <b>OTP System & Inbox</b>", ikb([[btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })], [btn("👥 OTP Group Settings", { callback_data: "adm_otp_group_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_otp_group_menu") {
+        const curUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
+        const curSrc = walletConfig.otp_source_chat_id || env.OTP_SOURCE_CHAT_ID || "-1003888145264";
+        const kb = ikb([
+          [btn("🔗 Set OTP Group Link", { callback_data: "adm_set_otp_group_url", style: "success" })],
+          [btn("🆔 Set OTP Source Chat ID", { callback_data: "adm_set_otp_source_id" })],
+          [btn("Back", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `👥 <b>OTP Group Settings</b>\n\n🔗 <b>OTP Group Link:</b> <code>${escapeHtml(curUrl)}</code>\n🆔 <b>OTP Source Chat ID:</b> <code>${escapeHtml(curSrc)}</code>`, kb);
+      } else if (data === "adm_set_otp_group_url") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_otp_group_url" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🔗 Send the new <b>OTP Group Invite Link</b> (e.g. <code>https://t.me/+...</code> or <code>https://t.me/groupname</code>):\nSend /cancel to abort.");
+      } else if (data === "adm_set_otp_source_id") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_otp_source_id" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🆔 Send the <b>OTP Source Group/Channel Chat ID</b> (e.g. <code>-1003888145264</code>):\nSend /cancel to abort.");
+      }
       else if (data === "adm_menu_system") await tg.safeEditMessage(chatId, msgId, "⚙️ <b>System</b>", ikb([[btn("Export Backup", { callback_data: "adm_backup_export" }), btn("Cleanup Now", { callback_data: "adm_cleanup_now", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_add") {
         const rows = Object.keys(platforms).map((p) => [btn(p, { callback_data: `adm_add_svc|${p}` })]);
@@ -1256,8 +1332,8 @@ async function handleTelegramUpdate(update, env) {
         const popular = ["880", "91", "92", "977", "1", "44", "62", "84", "7", "234", "254", "60", "63", "66", "90", "55"];
         const merged = [];
         const seen = new Set();
-        for (const c of saved) { if (!seen.has(String(c.code))) { seen.add(String(c.code)); merged.push({ code: String(c.code), label: c.name || getCountryDisplayName(c.code) }); } }
-        for (const code of popular) { if (!seen.has(code)) { seen.add(code); merged.push({ code, label: getCountryDisplayName(code) }); } }
+        for (const c of saved) { if (!seen.has(String(c.code))) { seen.add(String(c.code)); merged.push({ code: String(c.code), label: c.name && /[^\x00-\x7F]/.test(c.name) ? c.name : getCountryButtonLabel(c.code) }); } }
+        for (const code of popular) { if (!seen.has(code)) { seen.add(code); merged.push({ code, label: getCountryButtonLabel(code) }); } }
         const rows = [[btn("🤖 Auto-Detect from Numbers", { callback_data: `adm_add_cty|${svc}|${prov || ""}|AUTO`, style: "primary" })]];
         for (let i = 0; i < merged.length; i += 2) {
           rows.push(merged.slice(i, i + 2).map((c) => btn(`${c.label} (+${c.code})`, { callback_data: `adm_add_cty|${svc}|${prov || ""}|${c.code}` })));
@@ -1281,7 +1357,7 @@ async function handleTelegramUpdate(update, env) {
         await tg.safeEditMessage(chatId, msgId, "🗑️ <b>Select Service:</b>", ikb(rows));
       } else if (data.startsWith("adm_rem_svc|")) {
         const svc = data.split("|")[1], cmap = await db.getCountryCounts(svc);
-        const rows = Object.entries(cmap).map(([c, cnt]) => [btn(`${getCountryDisplayName(c)} (${cnt})`, { callback_data: `adm_rem_cty|${svc}|${c}`, style: "danger" })]);
+        const rows = Object.entries(cmap).map(([c, cnt]) => [btn(`${getCountryButtonLabel(c)} (${cnt})`, { callback_data: `adm_rem_cty|${svc}|${c}`, style: "danger" })]);
         rows.push([btn("Back", { callback_data: "adm_remove", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         await tg.safeEditMessage(chatId, msgId, `🗑️ <b>Remove Country (${escapeHtml(svc)}):</b>`, ikb(rows));
       } else if (data.startsWith("adm_rem_cty|")) {
@@ -1291,9 +1367,8 @@ async function handleTelegramUpdate(update, env) {
         for (const s of Object.keys(platforms)) await db.removeNumbersByService(s);
         await tg.safeEditMessage(chatId, msgId, "✅ All numbers cleared.", adminPanelKb(uid, env, walletConfig));
       } else if (data === "adm_stats") {
-        const totU = await db.countUsers(), sum = await db.getAllNumbersSummary();
+        const [totU, sum, evs] = await Promise.all([db.countUsers(), db.getAllNumbersSummary(), db.getOtpEventsSince(nowTs() - 86400, 5000)]);
         let totN = 0; for (const cm of Object.values(sum)) for (const c of Object.values(cm)) totN += c;
-        const evs = await db.getOtpEventsSince(nowTs() - 86400, 5000);
         await tg.safeEditMessage(chatId, msgId, `<blockquote>📊 <b>Stats</b>\n👥 Users: ${totU}\n📱 Numbers: ${totN}\n🔐 OTPs (24h): ${evs.length}</blockquote>`, adminPanelKb(uid, env, walletConfig));
       } else if (data === "adm_withdraw_requests") {
         const list = await db.getWithdrawals("pending_manual", null, 10);
@@ -1376,7 +1451,7 @@ async function handleTelegramUpdate(update, env) {
       } else { u.last_seen = nowTs(); u.name = name; await db.saveUser(uid, u); }
       if (arg.startsWith("d_")) {
         const p = arg.slice(2), idx = p.indexOf("_");
-        if (idx > 0) { await deliverNumbersToUser(db, tg, chatId, null, uid, normalizeServiceName(p.slice(0, idx)), p.slice(idx + 1), walletConfig, platforms); return new Response("OK"); }
+        if (idx > 0) { await deliverNumbersToUser(db, tg, chatId, null, uid, normalizeServiceName(p.slice(0, idx)), p.slice(idx + 1), walletConfig, platforms, ctx); return new Response("OK"); }
       }
       await tg.sendMessage(chatId, `${tgEmoji("4918354603281482671", "👋")}ʜᴇʟʟᴏ &amp; ᴡᴇʟᴄᴏᴍᴇ <b>${escapeHtml(name)}</b>${tgEmoji("6192529992501437323", "💌")}\n${tgEmoji("6190485871536384315", "📞")}ɢᴇᴛ ꜰʀᴇᴇ ᴠɪʀᴛᴜᴀʟ ɴᴜᴍʙᴇʀꜱ\n${tgEmoji("6190482250878952084", "⚡️")}ꜰᴀꜱᴛ &amp; ꜱɪᴍᴘʟᴇ ꜱᴍꜱ ꜱᴇʀᴠɪᴄᴇ${tgEmoji("6190447113751504647", "✅")}`, { reply_markup: mainMenuKb(isAdminUser(uid, env, walletConfig)) });
       return new Response("OK");
@@ -1541,6 +1616,22 @@ async function handleTelegramUpdate(update, env) {
     await db.saveWalletConfig(walletConfig);
     u.pending_action = null; await db.saveUser(uid, u);
     await tg.sendMessage(chatId, `✅ Added required channel/group: <code>${escapeHtml(entry.id)}</code>\n\nAll non-admin users must now join this to use the bot!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+  } else if (pa.action === "adm_set_otp_group_url" && isAdminUser(uid, env, walletConfig)) {
+    const link = text.trim();
+    if (!/^https?:\/\/t\.me\//i.test(link)) { await tg.sendMessage(chatId, "❌ Invalid Telegram link. Must start with <code>https://t.me/</code>. Try again or /cancel."); return new Response("OK"); }
+    if (!walletConfig.channel_logs) walletConfig.channel_logs = {};
+    if (!walletConfig.channel_logs.otp_group) walletConfig.channel_logs.otp_group = { enabled: false, chat_id: "", bot_token: "", channel_url: "" };
+    walletConfig.channel_logs.otp_group.channel_url = link;
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ OTP Group link updated to:\n<code>${escapeHtml(link)}</code>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+  } else if (pa.action === "adm_set_otp_source_id" && isAdminUser(uid, env, walletConfig)) {
+    const cid = text.trim();
+    if (!/^-?\d+$/.test(cid)) { await tg.sendMessage(chatId, "❌ Invalid Chat ID (e.g. <code>-1003888145264</code>). Try again or /cancel."); return new Response("OK"); }
+    walletConfig.otp_source_chat_id = cid;
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ OTP Source Chat ID updated to: <code>${escapeHtml(cid)}</code>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
   } else if (pa.action === "adm_broadcast" && isAdminUser(uid, env, walletConfig)) {
     u.pending_action = null; await db.saveUser(uid, u);
     const ids = await db.getAllUserIds(); let sent = 0;
@@ -1552,7 +1643,7 @@ async function handleTelegramUpdate(update, env) {
 
 // ============ 8. CLOUDFLARE PAGES ENTRY POINT (_worker.js) ============
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -1580,7 +1671,14 @@ export default {
     if (request.method === "POST" && (path === "/webhook" || path === "/telegram-webhook" || path === "/")) {
       if (!env.BOT_TOKEN || !env.DB) return new Response("Missing BOT_TOKEN or DB binding", { status: 500 });
       try {
-        return await handleTelegramUpdate(await request.json(), env);
+        const update = await request.json();
+        const work = handleTelegramUpdate(update, env, ctx).catch((e) => console.error("Webhook error:", e));
+        if (ctx?.waitUntil) {
+          ctx.waitUntil(work);
+          return new Response("OK", { status: 200 });
+        }
+        await work;
+        return new Response("OK", { status: 200 });
       } catch (e) {
         return new Response("Error: " + e.message, { status: 500 });
       }
