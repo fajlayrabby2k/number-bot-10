@@ -822,7 +822,7 @@ function mainMenuKb(isAdmin = false) {
     [{ text: "𝐒𝐮𝐩𝐩𝐨𝐫𝐭", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro }],
   ];
   if (isAdmin) {
-    rows[2].push({ text: "👑 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥", icon_custom_emoji_id: CUSTOM_EMOJIS.shield });
+    rows.push([{ text: "👑 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }]);
   }
   return rkb(rows);
 }
@@ -1194,7 +1194,23 @@ async function handleTelegramUpdate(update, env) {
       await tg.sendMessage(chatId, "💬 Send your message for Admin Support (or /cancel):");
     } else if (isAdminUser(uid, env, walletConfig)) {
       if (data === "adm_panel") await tg.safeEditMessage(chatId, msgId, "👑 <b>Admin Control Hub</b>", adminPanelKb(uid, env, walletConfig));
-      else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("🌍 Manage Countries", { callback_data: "adm_countries_menu" }), btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_countries_menu") {
+        const saved = walletConfig.custom_countries || [];
+        const rows = saved.map((c) => [btn(`❌ ${c.name || getCountryDisplayName(c.code)} (+${c.code})`, { callback_data: `adm_del_country|${c.code}`, style: "danger" })]);
+        rows.push([btn("➕ Add Country", { callback_data: "adm_add_country", style: "success" })]);
+        rows.push([btn("Back", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        const txt = saved.length ? `🌍 <b>Saved Countries (${saved.length})</b>\nSelect to remove or add a new country:` : "🌍 <b>Saved Countries</b>\n<i>No custom countries saved yet. Add one below!</i>";
+        await tg.safeEditMessage(chatId, msgId, txt, ikb(rows));
+      } else if (data === "adm_add_country") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_add_country" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🌍 Send country code (and optional name):\n\n• <code>880</code> (auto-names from map)\n• <code>880 | 🇧🇩 Bangladesh</code>\n\nSend /cancel to abort.");
+      } else if (data.startsWith("adm_del_country|")) {
+        const code = data.split("|")[1];
+        walletConfig.custom_countries = (walletConfig.custom_countries || []).filter((c) => String(c.code) !== String(code));
+        await db.saveWalletConfig(walletConfig);
+        await tg.safeEditMessage(chatId, msgId, `✅ Removed country <code>+${escapeHtml(code)}</code>.`, adminPanelKb(uid, env, walletConfig));
+      }
       else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("Stats", { callback_data: "adm_stats" }), btn("Search User", { callback_data: "adm_search_user" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_wallet") await tg.safeEditMessage(chatId, msgId, "💰 <b>Wallet & Withdraw</b>", ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast & Required Channels</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" }), btn("Required Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
@@ -1235,9 +1251,29 @@ async function handleTelegramUpdate(update, env) {
         rows.push([btn("Default (No Provider)", { callback_data: `adm_add_prov|${svc}|` })]);
         await tg.safeEditMessage(chatId, msgId, `📦 <b>Select Provider for ${escapeHtml(svc)}:</b>`, ikb(rows));
       } else if (data.startsWith("adm_add_prov|")) {
+        const [, svc, prov] = data.split("|");
+        const saved = walletConfig.custom_countries || [];
+        const popular = ["880", "91", "92", "977", "1", "44", "62", "84", "7", "234", "254", "60", "63", "66", "90", "55"];
+        const merged = [];
+        const seen = new Set();
+        for (const c of saved) { if (!seen.has(String(c.code))) { seen.add(String(c.code)); merged.push({ code: String(c.code), label: c.name || getCountryDisplayName(c.code) }); } }
+        for (const code of popular) { if (!seen.has(code)) { seen.add(code); merged.push({ code, label: getCountryDisplayName(code) }); } }
+        const rows = [[btn("🤖 Auto-Detect from Numbers", { callback_data: `adm_add_cty|${svc}|${prov || ""}|AUTO`, style: "primary" })]];
+        for (let i = 0; i < merged.length; i += 2) {
+          rows.push(merged.slice(i, i + 2).map((c) => btn(`${c.label} (+${c.code})`, { callback_data: `adm_add_cty|${svc}|${prov || ""}|${c.code}` })));
+        }
+        rows.push([btn("✏️ Type Country Code", { callback_data: `adm_add_cty_type|${svc}|${prov || ""}`, style: "success" })]);
+        rows.push([btn("Back", { callback_data: `adm_add_svc|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, `🌍 <b>Select Country for ${escapeHtml(svc)}</b>${prov ? ` (${escapeHtml(prov)})` : ""}:`, ikb(rows));
+      } else if (data.startsWith("adm_add_cty_type|")) {
         const [, svc, prov] = data.split("|"), u = await db.getUser(uid);
-        if (u) { u.pending_action = { action: "add_numbers_upload", service: svc, provider: prov || "" }; await db.saveUser(uid, u); }
-        await tg.sendMessage(chatId, `📤 Upload <b>.xlsx / .csv / .txt</b> or paste numbers for <b>${escapeHtml(svc)}</b>:`);
+        if (u) { u.pending_action = { action: "adm_add_cty_type", service: svc, provider: prov || "" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `✏️ Type country code (e.g. <code>880</code> or <code>880 | Bangladesh</code>) for <b>${escapeHtml(svc)}</b>:\nSend /cancel to abort.`);
+      } else if (data.startsWith("adm_add_cty|")) {
+        const [, svc, prov, ccode] = data.split("|"), u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "add_numbers_upload", service: svc, provider: prov || "", country: ccode || "AUTO" }; await db.saveUser(uid, u); }
+        const cLabel = ccode && ccode !== "AUTO" ? `${getCountryDisplayName(ccode)} (+${ccode})` : "Auto-Detect";
+        await tg.sendMessage(chatId, `📤 Upload <b>.xlsx / .csv / .txt</b> or paste numbers for <b>${escapeHtml(svc)}</b> [${escapeHtml(cLabel)}]:\nSend /cancel to abort.`);
       } else if (data === "adm_remove") {
         const sum = await db.getAllNumbersSummary();
         const rows = Object.keys(sum).map((s) => [btn(s, { callback_data: `adm_rem_svc|${s}` })]);
@@ -1414,7 +1450,8 @@ async function handleTelegramUpdate(update, env) {
       for (const n of parsed) {
         const cl = n.replace(/[^\d]/g, "");
         if (walletConfig.number_filter?.enabled && (await db.isFilteredNumber(cl))) continue;
-        const [cc] = extractCountryCode(n), ck = makeCountryProviderKey(cc, pa.provider || "");
+        const cc = pa.country && pa.country !== "AUTO" ? pa.country : extractCountryCode(n)[0];
+        const ck = makeCountryProviderKey(cc, pa.provider || "");
         if (!grouped[ck]) grouped[ck] = []; grouped[ck].push(n);
       }
       for (const [ck, list] of Object.entries(grouped)) added += await db.addNumbers(pa.service, ck, list);
@@ -1427,12 +1464,38 @@ async function handleTelegramUpdate(update, env) {
   if (pa.action === "add_numbers_upload" && text && isAdminUser(uid, env, walletConfig)) {
     const parsed = extractNumbersFromText(text), grouped = {}; let added = 0;
     for (const n of parsed) {
-      const [cc] = extractCountryCode(n), ck = makeCountryProviderKey(cc, pa.provider || "");
+      const cc = pa.country && pa.country !== "AUTO" ? pa.country : extractCountryCode(n)[0];
+      const ck = makeCountryProviderKey(cc, pa.provider || "");
       if (!grouped[ck]) grouped[ck] = []; grouped[ck].push(n);
     }
     for (const [ck, list] of Object.entries(grouped)) added += await db.addNumbers(pa.service, ck, list);
     u.pending_action = null; await db.saveUser(uid, u);
     await tg.sendMessage(chatId, `✅ Added <b>${added}</b> numbers to <b>${escapeHtml(pa.service)}</b>!`);
+  } else if (pa.action === "adm_add_country" && isAdminUser(uid, env, walletConfig)) {
+    const [rawCode, rawName] = text.split("|").map((s) => s.trim());
+    const code = rawCode.replace(/[^\d]/g, "");
+    if (!code) { await tg.sendMessage(chatId, "❌ Invalid country code."); return new Response("OK"); }
+    const name = rawName || getCountryDisplayName(code);
+    if (!Array.isArray(walletConfig.custom_countries)) walletConfig.custom_countries = [];
+    if (!walletConfig.custom_countries.some((c) => String(c.code) === code)) {
+      walletConfig.custom_countries.push({ code, name });
+    }
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Saved country: <b>${escapeHtml(name)}</b> (<code>+${code}</code>)`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+  } else if (pa.action === "adm_add_cty_type" && isAdminUser(uid, env, walletConfig)) {
+    const [rawCode, rawName] = text.split("|").map((s) => s.trim());
+    const code = rawCode.replace(/[^\d]/g, "");
+    if (!code) { await tg.sendMessage(chatId, "❌ Invalid country code. Try again or /cancel."); return new Response("OK"); }
+    const name = rawName || getCountryDisplayName(code);
+    if (!Array.isArray(walletConfig.custom_countries)) walletConfig.custom_countries = [];
+    if (!walletConfig.custom_countries.some((c) => String(c.code) === code)) {
+      walletConfig.custom_countries.push({ code, name });
+      await db.saveWalletConfig(walletConfig);
+    }
+    u.pending_action = { action: "add_numbers_upload", service: pa.service, provider: pa.provider || "", country: code };
+    await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Country set to <b>${escapeHtml(name)} (+${code})</b>.\n\n📤 Now upload <b>.xlsx / .csv / .txt</b> or paste numbers for <b>${escapeHtml(pa.service)}</b>:`);
   } else if (pa.action === "live_support") {
     const fwd = await tg.sendMessage(adminId, `📩 <b>Support</b> from ${escapeHtml(u.name)} (<code>${uid}</code>):\n\n${escapeHtml(text || "[Media]")}`);
     if (fwd.ok) await db.setSupportMap(fwd.result.message_id, uid);
