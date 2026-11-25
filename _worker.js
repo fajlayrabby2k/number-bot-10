@@ -815,12 +815,16 @@ class BotDB {
 }
 
 // ============ 5. KEYBOARDS ============
-function mainMenuKb() {
-  return rkb([
+function mainMenuKb(isAdmin = false) {
+  const rows = [
     [{ text: "𝐆𝐞𝐭 𝐍𝐮𝐦𝐛𝐞𝐫", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number }, { text: "𝐋𝐢𝐯𝐞 𝐓𝐫𝐚𝐟𝐟𝐢𝐜", icon_custom_emoji_id: "6084477132254218612" }],
     [{ text: "𝐖𝐚𝐥𝐥𝐞𝐭", icon_custom_emoji_id: "5190576863226933563" }, { text: "𝐋𝐞𝐚𝐝𝐞𝐫𝐛𝐨𝐚𝐫𝐝", icon_custom_emoji_id: "6266973397922616654" }],
     [{ text: "𝐒𝐮𝐩𝐩𝐨𝐫𝐭", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro }],
-  ]);
+  ];
+  if (isAdmin) {
+    rows[2].push({ text: "👑 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥", icon_custom_emoji_id: CUSTOM_EMOJIS.shield });
+  }
+  return rkb(rows);
 }
 function servicesKbAvailable(summary, walletConfig, platforms) {
   const buttons = [];
@@ -870,21 +874,47 @@ function adminPanelKb(uid, env, walletConfig) {
 }
 
 // ============ 6. CORE SERVICES ============
+function parseChannelEntry(ch) {
+  if (ch && typeof ch === "object") {
+    return { id: String(ch.id || "").trim(), url: String(ch.url || "").trim() };
+  }
+  const s = String(ch || "").trim();
+  if (s.includes("|")) {
+    const [idPart, urlPart] = s.split("|", 2).map((x) => x.trim());
+    return { id: idPart, url: urlPart };
+  }
+  if (/^https?:\/\/t\.me\//i.test(s)) {
+    const slug = s.replace(/^https?:\/\/t\.me\//i, "").split(/[/?]/)[0];
+    if (slug && !slug.startsWith("+")) {
+      return { id: `@${slug}`, url: `https://t.me/${slug}` };
+    }
+    return { id: s, url: s };
+  }
+  const clean = s.startsWith("@") ? s : (/^-?\d+$/.test(s) ? s : `@${s}`);
+  const url = clean.startsWith("@") ? `https://t.me/${clean.slice(1)}` : "";
+  return { id: clean, url };
+}
 async function getChannelTitle(ch, tg) {
-  const c = String(ch || "").trim();
+  const entry = parseChannelEntry(ch);
+  const c = entry.id;
   if (CHANNEL_TITLE_CACHE[c]) return CHANNEL_TITLE_CACHE[c];
   try { const r = await tg.getChat(c); if (r.ok && r.result?.title) { CHANNEL_TITLE_CACHE[c] = r.result.title; return r.result.title; } } catch {}
   return c.replace(/^@/, "");
 }
 async function getUnjoinedChannels(userId, db, tg, env, walletConfig, force = false) {
   if (isAdminUser(userId, env, walletConfig)) return [];
-  const req = walletConfig.required_channels || DEFAULT_REQUIRED_CHANNELS;
+  const req = walletConfig.required_channels !== undefined ? walletConfig.required_channels : DEFAULT_REQUIRED_CHANNELS;
   if (!req?.length) return [];
-  if (!force) { const u = await db.getUser(userId); if (u?.joined) return []; }
+  const chUpdatedAt = Number(walletConfig.channels_updated_at || 0);
+  if (!force) {
+    const u = await db.getUser(userId);
+    if (u?.joined && u.joined >= chUpdatedAt) return [];
+  }
   const unjoined = [];
   for (const ch of req) {
+    const entry = parseChannelEntry(ch);
     try {
-      const r = await tg.getChatMember(ch, userId);
+      const r = await tg.getChatMember(entry.id, userId);
       if (!r.ok || !["member", "administrator", "creator"].includes(r.result?.status)) unjoined.push(ch);
     } catch { unjoined.push(ch); }
   }
@@ -894,12 +924,15 @@ async function getUnjoinedChannels(userId, db, tg, env, walletConfig, force = fa
 async function ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig) {
   const unjoined = await getUnjoinedChannels(uid, db, tg, env, walletConfig, false);
   if (!unjoined.length) return true;
-  const titles = [];
-  for (const ch of unjoined) titles.push(`• ${await getChannelTitle(ch, tg)}`);
-  const rows = [];
-  for (const ch of unjoined) rows.push([btn(`📢 ${await getChannelTitle(ch, tg)}`, { url: `https://t.me/${String(ch).replace(/^@/, "")}` })]);
+  const titles = [], rows = [];
+  for (const ch of unjoined) {
+    const entry = parseChannelEntry(ch);
+    const title = await getChannelTitle(ch, tg);
+    titles.push(`• ${title}`);
+    if (entry.url) rows.push([btn(`📢 ${title}`, { url: entry.url })]);
+  }
   rows.push([btn("I have joined", { callback_data: "check_join", icon_custom_emoji_id: CUSTOM_EMOJIS.check })]);
-  const prompt = `🔒 <b>Access Restricted</b>\n\nYou must join the following channel(s) to use this bot:\n${titles.join("\n")}\n\nPlease click the buttons below, join all channels, then click '✅ I have joined'.`;
+  const prompt = `🔒 <b>Access Restricted</b>\n\nYou must join the following channel(s)/group(s) to use this bot:\n${titles.join("\n")}\n\nPlease join and click '✅ I have joined' to verify.`;
   if (msgId) await tg.safeEditMessage(chatId, msgId, prompt, ikb(rows));
   else await tg.sendMessage(chatId, prompt, { reply_markup: ikb(rows) });
   return false;
@@ -1108,7 +1141,7 @@ async function handleTelegramUpdate(update, env) {
       const un = await getUnjoinedChannels(uid, db, tg, env, walletConfig, true);
       if (un.length) { await ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig); return new Response("OK"); }
       await tg.deleteMessage(chatId, msgId).catch(() => {});
-      await tg.sendMessage(chatId, "✅ <b>Verified!</b> Welcome to the bot.", { reply_markup: mainMenuKb() });
+      await tg.sendMessage(chatId, "✅ <b>Verified!</b> Welcome to the bot.", { reply_markup: mainMenuKb(isAdminUser(uid, env, walletConfig)) });
       return new Response("OK");
     }
     if (!(await ensureMembership(uid, chatId, msgId, db, tg, env, walletConfig))) return new Response("OK");
@@ -1164,7 +1197,32 @@ async function handleTelegramUpdate(update, env) {
       else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("Stats", { callback_data: "adm_stats" }), btn("Search User", { callback_data: "adm_search_user" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_wallet") await tg.safeEditMessage(chatId, msgId, "💰 <b>Wallet & Withdraw</b>", ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
-      else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast & Required Channels</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" }), btn("Required Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_channels_menu") {
+        const chs = walletConfig.required_channels || [];
+        const rows = chs.map((c, idx) => { const e = parseChannelEntry(c); return [btn(`❌ Remove: ${e.id}`, { callback_data: `adm_del_ch|${idx}`, style: "danger" })]; });
+        rows.push([btn("➕ Add Channel / Group", { callback_data: "adm_add_channel", style: "success" })]);
+        if (chs.length) rows.push([btn("🗑️ Clear All (Disable Force Join)", { callback_data: "adm_clear_channels", style: "danger" })]);
+        rows.push([btn("Back", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        const listTxt = chs.length ? chs.map((c, i) => `${i + 1}. <code>${escapeHtml(parseChannelEntry(c).id)}</code>`).join("\n") : "<i>No required channels (Force Join disabled)</i>";
+        await tg.safeEditMessage(chatId, msgId, `🔒 <b>Required Channels (Force Join)</b>\n\n${listTxt}`, ikb(rows));
+      } else if (data === "adm_add_channel") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_add_channel" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "📢 Send the Channel/Group username or link:\n\n• Public: <code>@ROXYSMSNEWS</code> or <code>https://t.me/ROXYSMSNEWS</code>\n• Private Group/Channel: <code>-1001234567890 | https://t.me/+InviteLink</code>\n\n<i>(Note: Bot must be Admin in that channel/group!)</i>\nSend /cancel to abort.");
+      } else if (data.startsWith("adm_del_ch|")) {
+        const idx = parseInt(data.split("|")[1], 10);
+        if (Array.isArray(walletConfig.required_channels) && idx >= 0 && idx < walletConfig.required_channels.length) {
+          walletConfig.required_channels.splice(idx, 1);
+          walletConfig.channels_updated_at = nowTs();
+          await db.saveWalletConfig(walletConfig);
+        }
+        await tg.safeEditMessage(chatId, msgId, "✅ Channel removed.", adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_clear_channels") {
+        walletConfig.required_channels = [];
+        walletConfig.channels_updated_at = nowTs();
+        await db.saveWalletConfig(walletConfig);
+        await tg.safeEditMessage(chatId, msgId, "✅ All required channels cleared (Force Join disabled).", adminPanelKb(uid, env, walletConfig));
+      }
       else if (data === "adm_menu_otp") await tg.safeEditMessage(chatId, msgId, "📥 <b>OTP APIs</b>", ikb([[btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_system") await tg.safeEditMessage(chatId, msgId, "⚙️ <b>System</b>", ikb([[btn("Export Backup", { callback_data: "adm_backup_export" }), btn("Cleanup Now", { callback_data: "adm_cleanup_now", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_add") {
@@ -1284,8 +1342,7 @@ async function handleTelegramUpdate(update, env) {
         const p = arg.slice(2), idx = p.indexOf("_");
         if (idx > 0) { await deliverNumbersToUser(db, tg, chatId, null, uid, normalizeServiceName(p.slice(0, idx)), p.slice(idx + 1), walletConfig, platforms); return new Response("OK"); }
       }
-      if (isAdminUser(uid, env, walletConfig)) await tg.sendMessage(chatId, "👑 <b>Admin Panel</b>", { reply_markup: adminPanelKb(uid, env, walletConfig) });
-      await tg.sendMessage(chatId, `${tgEmoji("4918354603281482671", "👋")}ʜᴇʟʟᴏ &amp; ᴡᴇʟᴄᴏᴍᴇ <b>${escapeHtml(name)}</b>${tgEmoji("6192529992501437323", "💌")}\n${tgEmoji("6190485871536384315", "📞")}ɢᴇᴛ ꜰʀᴇᴇ ᴠɪʀᴛᴜᴀʟ ɴᴜᴍʙᴇʀꜱ\n${tgEmoji("6190482250878952084", "⚡️")}ꜰᴀꜱᴛ &amp; ꜱɪᴍᴘʟᴇ ꜱᴍꜱ ꜱᴇʀᴠɪᴄᴇ${tgEmoji("6190447113751504647", "✅")}`, { reply_markup: mainMenuKb() });
+      await tg.sendMessage(chatId, `${tgEmoji("4918354603281482671", "👋")}ʜᴇʟʟᴏ &amp; ᴡᴇʟᴄᴏᴍᴇ <b>${escapeHtml(name)}</b>${tgEmoji("6192529992501437323", "💌")}\n${tgEmoji("6190485871536384315", "📞")}ɢᴇᴛ ꜰʀᴇᴇ ᴠɪʀᴛᴜᴀʟ ɴᴜᴍʙᴇʀꜱ\n${tgEmoji("6190482250878952084", "⚡️")}ꜰᴀꜱᴛ &amp; ꜱɪᴍᴘʟᴇ ꜱᴍꜱ ꜱᴇʀᴠɪᴄᴇ${tgEmoji("6190447113751504647", "✅")}`, { reply_markup: mainMenuKb(isAdminUser(uid, env, walletConfig)) });
       return new Response("OK");
     }
     if (cmd === "/admin" && isAdminUser(uid, env, walletConfig)) {
@@ -1326,6 +1383,10 @@ async function handleTelegramUpdate(update, env) {
   }
   if (text.includes("𝐒𝐮𝐩𝐩𝐨𝐫𝐭") || text.toUpperCase().includes("SUPPORT")) {
     await tg.sendMessage(chatId, `<blockquote><b>${tgEmoji(CUSTOM_EMOJIS.support_pro, "❓")} Help & Support</b></blockquote>`, { reply_markup: ikb([[btn("💬 Live Support Chat", { callback_data: "start_live_support", style: "success" })], [btn("📢 Main Channel", { url: "https://t.me/ROXYSMSNEWS" })]]) });
+    return new Response("OK");
+  }
+  if ((text.includes("𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥") || text.toUpperCase().includes("ADMIN PANEL")) && isAdminUser(uid, env, walletConfig)) {
+    await tg.sendMessage(chatId, "👑 <b>Admin Control Hub</b>", { reply_markup: adminPanelKb(uid, env, walletConfig) });
     return new Response("OK");
   }
 
@@ -1408,6 +1469,15 @@ async function handleTelegramUpdate(update, env) {
       await db.saveWalletConfig(walletConfig); u.pending_action = null; await db.saveUser(uid, u);
       await tg.sendMessage(chatId, `✅ API <b>${escapeHtml(name)}</b> added!`);
     }
+  } else if (pa.action === "adm_add_channel" && isAdminUser(uid, env, walletConfig)) {
+    const entry = parseChannelEntry(text);
+    if (!entry.id) { await tg.sendMessage(chatId, "❌ Invalid channel format. Try again or /cancel."); return new Response("OK"); }
+    if (!Array.isArray(walletConfig.required_channels)) walletConfig.required_channels = [];
+    walletConfig.required_channels.push(entry);
+    walletConfig.channels_updated_at = nowTs();
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Added required channel/group: <code>${escapeHtml(entry.id)}</code>\n\nAll non-admin users must now join this to use the bot!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
   } else if (pa.action === "adm_broadcast" && isAdminUser(uid, env, walletConfig)) {
     u.pending_action = null; await db.saveUser(uid, u);
     const ids = await db.getAllUserIds(); let sent = 0;
