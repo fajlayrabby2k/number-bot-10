@@ -1073,7 +1073,7 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
   const msgHtml = `<blockquote><b>╭──────── ⋆⋅☆⋅⋆ ────────╮</b>\n<b>  ${getCountryFlagEmoji(dial)} ${getCountryDisplayName(ccode)} Fresh Number</b>\n<b>   ${getPlatformEmojiHtml(svc, platforms)} ${svc} • <tg-emoji emoji-id="5978841844673416652">⏳</tg-emoji> ${NUMBER_VALIDITY_SECONDS / 60}M</b>\n<b>   <tg-emoji emoji-id="6282702779341346176">🔄</tg-emoji> Refreshed: ${new Date().toLocaleTimeString("en-US", { hour12: true })}</b>\n<b>╰──────── ⋆⋅☆⋅⋆ ────────╯</b></blockquote>`;
   const rows = fullNums.map((n) => [btn(n, { copy_text: n, icon_custom_emoji_id: CUSTOM_EMOJIS.number_copy, style: "success" })]);
   const rowB = [];
-  if (rem.length) rowB.push(btn("🔄 Change Number", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
+  if (rem.length) rowB.push(btn("🔄 Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
   rowB.push(btn("🌍 Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
   rows.push(rowB);
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
@@ -1606,7 +1606,21 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         await db.saveLeaderboard(lb);
         await tg.safeEditMessage(chatId, msgId, `✅ Leaderboard cycle switched to <b>${wasWeekly ? "Daily (24h)" : "Weekly (7 Days)"}</b>.`, ikb([[btn("🏆 Back to Settings", { callback_data: "adm_lb_settings_menu" })]]));
       }
-      else if (data === "adm_menu_wallet") await tg.safeEditMessage(chatId, msgId, "💰 <b>Wallet & Withdraw</b>", ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_wallet") {
+        const wSummary = Object.entries(walletConfig.withdraw_methods || {}).map(([m, d]) => `• <b>${escapeHtml(m)}:</b> ৳${Number(d.min_withdraw ?? 10).toFixed(2)}`).join("\n");
+        await tg.safeEditMessage(chatId, msgId, `💰 <b>Wallet & Withdraw</b>\n\n<b>💳 Current Minimum Withdraw:</b>\n${wSummary || "৳10.00"}`, ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("💳 Min Withdraw", { callback_data: "adm_min_withdraw_menu", style: "primary" })], [btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      } else if (data === "adm_min_withdraw_menu") {
+        const methods = walletConfig.withdraw_methods || {};
+        const rows = Object.entries(methods).map(([m, d]) => [btn(`${m} (Min ৳${Number(d.min_withdraw ?? 10).toFixed(2)})`, { callback_data: `adm_set_min_wd|${m}`, style: "primary" })]);
+        rows.push([btn("🌐 Set All Methods (Same Limit)", { callback_data: "adm_set_min_wd|ALL", style: "success" })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, "💳 <b>Minimum Withdraw Settings</b>\n\nSelect a method to change its minimum withdrawal amount (in BDT):", ikb(rows));
+      } else if (data.startsWith("adm_set_min_wd|")) {
+        const method = data.split("|")[1];
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_min_wd", method }; await db.saveUser(uid, u); }
+        const label = method === "ALL" ? "ALL Withdraw Methods" : method;
+        await tg.sendMessage(chatId, `💳 Enter new minimum withdraw amount (BDT) for <b>${escapeHtml(label)}</b> (e.g. <code>50</code>):\n\nSend /cancel to abort.`);
+      }
       else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast & Required Channels</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" }), btn("Required Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_channels_menu") {
         const chs = walletConfig.required_channels || [];
@@ -2029,6 +2043,25 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       u.pending_action = null; await db.saveUser(uid, u);
       await tg.sendMessage(chatId, `✅ Rate for <b>${escapeHtml(pa.service)}</b> set to ৳${val.toFixed(2)}`);
     }
+  } else if (pa.action === "adm_set_min_wd" && isAdminUser(uid, env, walletConfig)) {
+    const val = parseFloat(text);
+    if (isNaN(val) || val < 0) { await tg.sendMessage(chatId, "❌ Invalid amount. Enter a valid number (e.g. <code>50</code>) or /cancel."); return new Response("OK"); }
+    if (!walletConfig.withdraw_methods) walletConfig.withdraw_methods = {};
+    if (pa.method === "ALL") {
+      walletConfig.min_withdraw = val;
+      if (!walletConfig.manual_withdraw) walletConfig.manual_withdraw = { enabled: true, min_amount: val, instructions: "" };
+      else walletConfig.manual_withdraw.min_amount = val;
+      for (const k of Object.keys(walletConfig.withdraw_methods)) {
+        walletConfig.withdraw_methods[k].min_withdraw = val;
+      }
+    } else {
+      if (!walletConfig.withdraw_methods[pa.method]) walletConfig.withdraw_methods[pa.method] = { min_withdraw: val, emoji_id: "" };
+      else walletConfig.withdraw_methods[pa.method].min_withdraw = val;
+    }
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    const label = pa.method === "ALL" ? "ALL Withdraw Methods" : pa.method;
+    await tg.sendMessage(chatId, `✅ Minimum withdraw for <b>${escapeHtml(label)}</b> saved to <b>৳${val.toFixed(2)} BDT</b>!`, { reply_markup: ikb([[btn("💳 Min Withdraw Settings", { callback_data: "adm_min_withdraw_menu" })], [btn("🔙 Admin Panel", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]) });
   } else if (pa.action === "adm_search_user" && isAdminUser(uid, env, walletConfig)) {
     const found = await db.findUsers(text); u.pending_action = null; await db.saveUser(uid, u);
     if (!found.length) await tg.sendMessage(chatId, "❌ No matching user found.");
