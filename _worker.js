@@ -279,7 +279,8 @@ const DEFAULT_WALLET_CONFIG = {
 const DEFAULT_LEADERBOARD = {
   daily_stats: {}, history: {}, claims: {},
   settings: {
-    enabled: true, cycle_type: "daily", cycle_hours: 24,
+    enabled: true, cycle_type: "weekly", cycle_hours: 168,
+    reward_text: "🥇 #1: ৳500 BDT\n🥈 #2: ৳300 BDT\n🥉 #3: ৳200 BDT\n🏅 #4 - #5: ৳100 BDT",
     rates: { diamond: 0.3, gold: 0.25, silver: 0.15, none: 0.1 },
     requirements: { diamond_min: 31, gold_min: 10, silver_min: 5, streak_days: 7 },
     top_winners_count: 5, claim_duration_hours: 24,
@@ -365,10 +366,20 @@ function formatNumber(number, countryCode) {
   if (dialCode && clean.startsWith(dialCode)) return `+${clean}`;
   return `+${dialCode}${clean}`;
 }
-function getRewardRate(walletConfig, service, countryCode) {
+function getRewardRate(walletConfig, service, countryCode, userData = null) {
+  const sClean = String(service || "").trim().toLowerCase();
+  // 1. Check VIP / Specific User Custom Service Rate
+  if (userData?.custom_rates && typeof userData.custom_rates === "object") {
+    for (const [uk, uv] of Object.entries(userData.custom_rates)) {
+      if (uk.toLowerCase() === sClean && uv !== null && uv !== undefined) return Number(uv);
+    }
+  }
+  // 2. Check VIP / Specific User Custom Global Rate
+  if (userData?.custom_global_rate !== undefined && userData?.custom_global_rate !== null) {
+    return Number(userData.custom_global_rate);
+  }
   const [dialCode] = splitCountryProvider(countryCode);
   const svcRates = walletConfig.service_rates || {};
-  const sClean = String(service || "").trim().toLowerCase();
   const cClean = String(countryCode || "").trim().replace(/^\+/, "");
   const dClean = String(dialCode || "").trim().replace(/^\+/, "");
   let matched = null;
@@ -941,7 +952,10 @@ function adminPanelKb(uid, env, walletConfig) {
   if (isSup) rows.push([btn("👑 Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
   if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
   if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
-  if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("💰 Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
+  if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) {
+    m.push(btn("💰 Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
+    m.push(btn("🎁 Reward Management", { callback_data: "adm_reward_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.dollar }));
+  }
   if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("🌐 Platforms & Services", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
   if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("👥 User Management", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.users }));
   if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) {
@@ -1065,14 +1079,35 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
 }
 
 function getCycleInfo(ts = null, st = {}) {
-  const now = ts !== null ? ts : nowTs(), d = new Date(now * 1000);
-  const ch = Number(st.cycle_hours || 24);
-  if (st.cycle_type === "hourly" || ch < 24) {
-    const p = Math.max(1, ch) * 3600, b = Math.floor(now / p), rem = Math.max(0, (b + 1) * p - now);
-    return { cycle_key: `${d.toISOString().slice(0, 10)}_b${b}`, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: `${ch}h Cycle` };
+  const now = ts !== null ? ts : nowTs();
+  const bdDate = new Date((now + 6 * 3600) * 1000); // Bangladesh Time (UTC+6)
+  const ch = Number(st.cycle_hours || 168);
+  const ctype = st.cycle_type || "weekly";
+  if (ctype === "weekly" || ch >= 168) {
+    // 7-day weekly cycle: resets every Saturday 00:00 BD Time (UTC+6)
+    const daysSinceSat = (bdDate.getUTCDay() + 1) % 7; // Sat=0, Sun=1, ..., Fri=6
+    const weekStartBdMs = Date.UTC(bdDate.getUTCFullYear(), bdDate.getUTCMonth(), bdDate.getUTCDate() - daysSinceSat);
+    const weekEndUtcSec = Math.floor((weekStartBdMs + 7 * 86400000) / 1000) - 6 * 3600;
+    const rem = Math.max(0, weekEndUtcSec - now);
+    const dayKeys = [];
+    for (let i = 0; i < 7; i++) dayKeys.push(new Date(weekStartBdMs + i * 86400000).toISOString().slice(0, 10));
+    return {
+      cycle_key: `week_${dayKeys[0]}`,
+      day_keys: dayKeys,
+      days_left: Math.floor(rem / 86400),
+      hours_left: Math.floor((rem % 86400) / 3600),
+      mins_left: Math.floor((rem % 3600) / 60),
+      label: "Weekly (Sat–Fri)",
+    };
   }
-  const nextM = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000), rem = Math.max(0, nextM - now);
-  return { cycle_key: d.toISOString().slice(0, 10), hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: "Daily (24h)" };
+  const d = new Date(now * 1000);
+  if (ctype === "hourly" || ch < 24) {
+    const p = Math.max(1, ch) * 3600, b = Math.floor(now / p), rem = Math.max(0, (b + 1) * p - now);
+    return { cycle_key: `${d.toISOString().slice(0, 10)}_b${b}`, days_left: 0, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: `${ch}h Cycle` };
+  }
+  const nextM = Math.floor(Date.UTC(bdDate.getUTCFullYear(), bdDate.getUTCMonth(), bdDate.getUTCDate() + 1) / 1000) - 6 * 3600;
+  const rem = Math.max(0, nextM - now);
+  return { cycle_key: bdDate.toISOString().slice(0, 10), days_left: 0, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: "Daily (24h)" };
 }
 function calculateUserLevel(lb, uid, dateStr) {
   const st = lb.settings || {}, reqs = st.requirements || {}, days = Number(reqs.streak_days || 7);
@@ -1085,26 +1120,43 @@ function calculateUserLevel(lb, uid, dateStr) {
   return "none";
 }
 async function formatLeaderboardMessage(db, uid) {
-  const lb = await db.getLeaderboard(), st = lb.settings || {}, rates = st.rates || { diamond: 0.3, gold: 0.25, silver: 0.15, none: 0.1 };
-  const names = { diamond: "Diamond", gold: "Gold", silver: "Silver", none: "Regular" };
-  const now = nowTs(), pClaims = Object.values(lb.claims || {}).filter((c) => String(c.user_id) === String(uid) && c.status === "pending" && now <= (c.expires_at || 0));
-  if (st.enabled === false) return ["<blockquote>🏆 <b>TOP OTP LEADERBOARD</b>\n\n⚠️ <i>Paused by Admin.</i></blockquote>", pClaims];
-  const ci = getCycleInfo(now, st), dayStats = lb.daily_stats?.[ci.cycle_key] || {};
-  const sorted = Object.entries(dayStats).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]);
-  const topN = Number(st.top_winners_count || 5), lines = [`<blockquote>🏆 <b>TOP ${topN} OTP LEADERBOARD</b>\n⏳ <b>Resets In:</b> <code>${String(ci.hours_left).padStart(2, "0")}h ${String(ci.mins_left).padStart(2, "0")}m</code> • <i>${ci.label}</i></blockquote>\n`];
-  for (let i = 0; i < Math.min(topN, sorted.length); i++) {
-    const [uId, cnt] = sorted[i], u = await db.getUser(uId), lvl = calculateUserLevel(lb, uId, ci.cycle_key), r = Number(rates[lvl] ?? 0.1);
-    lines.push(`<b>#${i + 1} ${escapeHtml(u?.name || `User_${uId.slice(-4)}`)}</b> — ${cnt} OTPs • ৳${(cnt * r).toFixed(2)} (${names[lvl]})`);
+  const lb = await db.getLeaderboard(), st = lb.settings || {};
+  const now = nowTs();
+  if (st.enabled === false) return ["<blockquote>🏆 <b>TOP OTP LEADERBOARD</b>\n\n⚠️ <i>Paused by Admin.</i></blockquote>", []];
+  const ci = getCycleInfo(now, st);
+  const aggStats = {};
+  if (Array.isArray(ci.day_keys)) {
+    for (const dk of ci.day_keys) {
+      const ds = lb.daily_stats?.[dk] || {};
+      for (const [uId, c] of Object.entries(ds)) aggStats[uId] = (aggStats[uId] || 0) + Number(c || 0);
+    }
+  } else {
+    Object.assign(aggStats, lb.daily_stats?.[ci.cycle_key] || {});
   }
-  if (!sorted.length) lines.push("<i>No OTP activity in this cycle yet.</i>");
-  const myOtps = dayStats[String(uid)] || 0, myLvl = calculateUserLevel(lb, uid, ci.cycle_key), myRate = Number(rates[myLvl] ?? 0.1);
-  lines.push(`\n<blockquote>👤 <b>YOUR STATS:</b> ${myOtps} OTPs • ৳${(myOtps * myRate).toFixed(2)} (${names[myLvl]})</blockquote>`);
-  return [premiumizeText(lines.join("\n")), pClaims];
+  const sorted = Object.entries(aggStats).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]);
+  const topN = Number(st.top_winners_count || 5);
+  const resetStr = ci.days_left > 0 ? `${ci.days_left}d ${String(ci.hours_left).padStart(2, "0")}h ${String(ci.mins_left).padStart(2, "0")}m` : `${String(ci.hours_left).padStart(2, "0")}h ${String(ci.mins_left).padStart(2, "0")}m`;
+  const rewardText = st.reward_text || DEFAULT_LEADERBOARD.settings.reward_text;
+  const rankIcons = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
+
+  const lines = [
+    `<blockquote>🎁 <b>WEEKLY LEADERBOARD REWARD</b>\n${escapeHtml(rewardText)}</blockquote>\n`,
+    `<blockquote>🏆 <b>TOP ${topN} OTP LEADERBOARD</b>\n⏳ <b>New Week In:</b> <code>${resetStr}</code> • <i>${ci.label}</i></blockquote>\n`,
+  ];
+  for (let i = 0; i < Math.min(topN, sorted.length); i++) {
+    const [uId, cnt] = sorted[i], u = await db.getUser(uId);
+    const badge = rankIcons[i] || `#${i + 1}`;
+    lines.push(`${badge} <b>#${i + 1} ${escapeHtml(u?.name || `User_${uId.slice(-4)}`)}</b> — <b>${cnt} OTPs</b>`);
+  }
+  if (!sorted.length) lines.push("<i>No OTP activity in this week yet.</i>");
+  const myOtps = aggStats[String(uid)] || 0;
+  const myRank = sorted.findIndex(([uId]) => String(uId) === String(uid));
+  const rankStr = myRank >= 0 ? `#${myRank + 1}` : "Unranked";
+  lines.push(`\n<blockquote>👤 <b>YOUR STATS (${rankStr}):</b> <b>${myOtps} OTPs</b>\n<i>Top 5 are selected automatically every Saturday. Rewards are provided by Admin.</i></blockquote>`);
+  return [premiumizeText(lines.join("\n")), []];
 }
-function leaderboardViewKb(pClaims = []) {
-  const rows = pClaims.map((cl) => [btn(`Claim ৳${Number(cl.amount || 0).toFixed(2)} TK Bonus`, { callback_data: `claim_lb|${cl.claim_id}`, icon_custom_emoji_id: CUSTOM_EMOJIS.diamond, style: "success" })]);
-  rows.push([btn("Refresh", { callback_data: "refresh_leaderboard", icon_custom_emoji_id: CUSTOM_EMOJIS.refresh })]);
-  return ikb(rows);
+function leaderboardViewKb() {
+  return ikb([[btn("🔄 Refresh", { callback_data: "refresh_leaderboard", icon_custom_emoji_id: CUSTOM_EMOJIS.refresh, style: "primary" })]]);
 }
 
 async function getTrafficStats(db, walletConfig) {
@@ -1209,10 +1261,10 @@ async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, servi
     dup = codeStr === "N/A" ? Boolean(ex && ex.code === "N/A" && ex.sms === smsBody) : Boolean(ex && ex.code === codeStr);
     if (!dup) {
       userData.otps[displayNum] = { code: codeStr, sms: smsBody, time: now };
-      const rate = getRewardRate(walletConfig, svcName, countryCode);
+      const rate = getRewardRate(walletConfig, svcName, countryCode, userData);
       userData.balance = Number(((userData.balance || 0) + rate).toFixed(2));
       await db.saveUser(buyerId, userData);
-      const lb = await db.getLeaderboard(), ck = getCycleInfo(now, lb.settings).cycle_key;
+      const lb = await db.getLeaderboard(), ck = new Date((now + 6 * 3600) * 1000).toISOString().slice(0, 10);
       if (!lb.daily_stats[ck]) lb.daily_stats[ck] = {};
       lb.daily_stats[ck][String(buyerId)] = (lb.daily_stats[ck][String(buyerId)] || 0) + 1;
       await db.saveLeaderboard(lb);
@@ -1224,7 +1276,7 @@ async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, servi
     }
   }
   await db.addOtpEvent({ ts: now, country: countryCode, service: svcName, user_id: buyerId, inbox: 1, number: displayNum, code: codeStr, sms: smsBody, duplicate: dup });
-  const rate = getRewardRate(walletConfig, svcName, countryCode), [dial] = splitCountryProvider(countryCode);
+  const rate = getRewardRate(walletConfig, svcName, countryCode, userData), [dial] = splitCountryProvider(countryCode);
   const otpMsg = dup
     ? `${getCountryFlagEmoji(dial)} <b>${getCountryDisplayName(countryCode)} - ${escapeHtml(svcName)}</b>\n📱 <code>${displayNum}</code>\n<i>⚠️ Duplicate OTP</i>`
     : `${getCountryFlagEmoji(dial)} <b>${getCountryDisplayName(countryCode)} - ${escapeHtml(svcName)}</b>\n📱 <code>${displayNum}</code>\n${tgEmoji(CUSTOM_EMOJIS.money, "💰")} <b>Earned:</b> +৳${rate.toFixed(2)} BDT`;
@@ -1424,15 +1476,50 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const tUid = data.split("|")[1], tu = await db.getUser(tUid);
         if (!tu) { await tg.safeEditMessage(chatId, msgId, "❌ User not found.", adminPanelKb(uid, env, walletConfig)); return new Response("OK"); }
         const stTxt = tu.banned ? "🚫 <b>BANNED</b>" : "🟢 <b>Active</b>";
-        const msgTxt = `<blockquote>👤 <b>User Management</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`;
+        const customInfo = (tu.custom_global_rate != null || (tu.custom_rates && Object.keys(tu.custom_rates).length))
+          ? `\n🎁 <b>VIP Rates:</b> ${tu.custom_global_rate != null ? `Global ৳${Number(tu.custom_global_rate).toFixed(2)} ` : ""}${Object.entries(tu.custom_rates || {}).map(([k, v]) => `${k}: ৳${Number(v).toFixed(2)}`).join(", ")}`
+          : "";
+        const msgTxt = `<blockquote>👤 <b>User Management</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}${customInfo}</blockquote>`;
         const kb = ikb([
           [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" })],
           [btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+          [btn("🎁 Set Custom Reward (VIP)", { callback_data: `adm_user_reward|${tu.uid}`, style: "primary" })],
           [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
           [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_confirm|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
           [btn("🔙 Back", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
         await tg.safeEditMessage(chatId, msgId, msgTxt, kb);
+      } else if (data === "adm_reward_menu") {
+        const kb = ikb([
+          [btn("🌐 All Users Service Rates", { callback_data: "adm_rate_settings", style: "success" })],
+          [btn("👤 Specific User Reward (Search)", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, "🎁 <b>Reward Management</b>\n\nSet global service rewards for all users, or search a specific user to give VIP custom rates:", kb);
+      } else if (data.startsWith("adm_user_reward|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (!tu) return new Response("OK");
+        const rows = Object.keys(platforms).map((svc) => {
+          const cur = tu.custom_rates?.[svc] ?? tu.custom_global_rate;
+          const tag = tu.custom_rates?.[svc] != null ? `VIP: ৳${Number(tu.custom_rates[svc]).toFixed(2)}` : `Default: ৳${Number(walletConfig.service_rates?.[svc]?.global ?? 0.5).toFixed(2)}`;
+          return [btn(`${svc} (${tag})`, { callback_data: `adm_u_rate_svc|${tUid}|${svc}` })];
+        });
+        rows.push([btn(`🌍 All Services Override (${tu.custom_global_rate != null ? "৳" + Number(tu.custom_global_rate).toFixed(2) : "Not Set"})`, { callback_data: `adm_u_rate_global|${tUid}`, style: "success" })]);
+        rows.push([btn("🔄 Reset User to Default Rates", { callback_data: `adm_u_rate_reset|${tUid}`, style: "danger" })]);
+        rows.push([btn("🔙 Back", { callback_data: `adm_view_user|${tUid}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, `🎁 <b>Custom Rewards for <code>${tUid}</code> (${escapeHtml(tu.name)})</b>\n\nSelect a service to set a custom BDT rate for this user:`, ikb(rows));
+      } else if (data.startsWith("adm_u_rate_svc|")) {
+        const [, tUid, svc] = data.split("|"), u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "adm_u_rate_svc", target_uid: tUid, service: svc }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `🎁 Enter custom <b>${escapeHtml(svc)}</b> reward rate (in BDT) for user <code>${tUid}</code> (or /cancel):`);
+      } else if (data.startsWith("adm_u_rate_global|")) {
+        const tUid = data.split("|")[1], u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "adm_u_rate_global", target_uid: tUid }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `🌍 Enter custom global reward rate (in BDT) for ALL services for user <code>${tUid}</code> (or /cancel):`);
+      } else if (data.startsWith("adm_u_rate_reset|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (tu) { delete tu.custom_rates; delete tu.custom_global_rate; await db.saveUser(tUid, tu); }
+        await tg.safeEditMessage(chatId, msgId, `✅ Reset custom rewards for <code>${tUid}</code> to default global rates.`, ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
       } else if (data.startsWith("adm_user_bal|")) {
         const [, mode, tUid] = data.split("|"), u = await db.getUser(uid);
         if (u) { u.pending_action = { action: "adm_user_bal", mode, target_uid: tUid }; await db.saveUser(uid, u); }
@@ -1484,7 +1571,32 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         await db.saveWalletConfig(walletConfig);
         await tg.safeEditMessage(chatId, msgId, `✅ Removed country <code>+${escapeHtml(code)}</code>.`, adminPanelKb(uid, env, walletConfig));
       }
-      else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("Stats", { callback_data: "adm_stats" }), btn("Search User", { callback_data: "adm_search_user" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("📊 Stats", { callback_data: "adm_stats" }), btn("🔍 Search User", { callback_data: "adm_search_user" })], [btn("🏆 Leaderboard Settings", { callback_data: "adm_lb_settings_menu", style: "primary" })], [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_lb_settings_menu") {
+        const lb = await db.getLeaderboard(), st = lb.settings || {};
+        const enabled = st.enabled !== false, isWeekly = (st.cycle_type || "weekly") === "weekly";
+        const rTxt = st.reward_text || DEFAULT_LEADERBOARD.settings.reward_text;
+        const kb = ikb([
+          [btn(enabled ? "🟢 Leaderboard: ON" : "🔴 Leaderboard: OFF", { callback_data: "adm_lb_toggle", style: enabled ? "success" : "danger" })],
+          [btn(`📅 Cycle: ${isWeekly ? "Weekly (Sat–Fri)" : "Daily (24h)"}`, { callback_data: "adm_lb_cycle_toggle", style: "primary" })],
+          [btn("🎁 Set Leaderboard Reward", { callback_data: "adm_lb_set_reward", style: "success" })],
+          [btn("🔙 Back", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `🏆 <b>Leaderboard Settings</b>\n\n• <b>Status:</b> ${enabled ? "🟢 ON" : "🔴 OFF"}\n• <b>Cycle:</b> ${isWeekly ? "Weekly (Resets every Saturday)" : "Daily (24h)"}\n• <b>Top Winners:</b> ${st.top_winners_count || 5}\n\n<b>🎁 Current Reward Display:</b>\n<code>${escapeHtml(rTxt)}</code>`, kb);
+      } else if (data === "adm_lb_set_reward") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_lb_set_reward" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🎁 Write the <b>Leaderboard Reward</b> text/amounts to show users at the top of Leaderboard (e.g. <code>🥇 #1: ৳500\n🥈 #2: ৳300</code>):\nSend /cancel to abort.");
+      } else if (data === "adm_lb_toggle") {
+        const lb = await db.getLeaderboard(); lb.settings.enabled = lb.settings.enabled === false; await db.saveLeaderboard(lb);
+        await tg.safeEditMessage(chatId, msgId, `✅ Leaderboard is now <b>${lb.settings.enabled ? "ON" : "OFF"}</b>.`, ikb([[btn("🏆 Back to Settings", { callback_data: "adm_lb_settings_menu" })]]));
+      } else if (data === "adm_lb_cycle_toggle") {
+        const lb = await db.getLeaderboard();
+        const wasWeekly = (lb.settings.cycle_type || "weekly") === "weekly";
+        lb.settings.cycle_type = wasWeekly ? "daily" : "weekly";
+        lb.settings.cycle_hours = wasWeekly ? 24 : 168;
+        await db.saveLeaderboard(lb);
+        await tg.safeEditMessage(chatId, msgId, `✅ Leaderboard cycle switched to <b>${wasWeekly ? "Daily (24h)" : "Weekly (7 Days)"}</b>.`, ikb([[btn("🏆 Back to Settings", { callback_data: "adm_lb_settings_menu" })]]));
+      }
       else if (data === "adm_menu_wallet") await tg.safeEditMessage(chatId, msgId, "💰 <b>Wallet & Withdraw</b>", ikb([[btn("Withdraw Requests", { callback_data: "adm_withdraw_requests" }), btn("Rate Settings", { callback_data: "adm_rate_settings" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_menu_broadcast") await tg.safeEditMessage(chatId, msgId, "📢 <b>Broadcast & Required Channels</b>", ikb([[btn("Broadcast Message", { callback_data: "adm_broadcast", style: "success" }), btn("Required Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_channels_menu") {
@@ -1914,10 +2026,36 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       const kb = ikb([
         [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" })],
         [btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+        [btn("🎁 Set Custom Reward (VIP)", { callback_data: `adm_user_reward|${tu.uid}`, style: "primary" })],
         [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
         [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_confirm|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
       ]);
       await tg.sendMessage(chatId, `<blockquote>👤 <b>User Found</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`, { reply_markup: kb });
+    }
+  } else if (pa.action === "adm_lb_set_reward" && isAdminUser(uid, env, walletConfig)) {
+    const lb = await db.getLeaderboard();
+    lb.settings.reward_text = text;
+    await db.saveLeaderboard(lb);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Updated Leaderboard Reward:\n\n<blockquote>${escapeHtml(text)}</blockquote>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+  } else if (pa.action === "adm_u_rate_svc" && isAdminUser(uid, env, walletConfig)) {
+    const val = parseFloat(text);
+    if (isNaN(val) || val < 0) { await tg.sendMessage(chatId, "❌ Invalid rate. Enter a valid number or /cancel."); return new Response("OK"); }
+    const tu = await db.getUser(pa.target_uid); u.pending_action = null; await db.saveUser(uid, u);
+    if (tu) {
+      if (!tu.custom_rates) tu.custom_rates = {};
+      tu.custom_rates[pa.service] = val;
+      await db.saveUser(tu.uid, tu);
+      await tg.sendMessage(chatId, `✅ VIP <b>${escapeHtml(pa.service)}</b> rate for <code>${tu.uid}</code> set to <b>৳${val.toFixed(2)} BDT</b>!`, { reply_markup: ikb([[btn("🎁 Manage User Rewards", { callback_data: `adm_user_reward|${tu.uid}` })]]) });
+    }
+  } else if (pa.action === "adm_u_rate_global" && isAdminUser(uid, env, walletConfig)) {
+    const val = parseFloat(text);
+    if (isNaN(val) || val < 0) { await tg.sendMessage(chatId, "❌ Invalid rate. Enter a valid number or /cancel."); return new Response("OK"); }
+    const tu = await db.getUser(pa.target_uid); u.pending_action = null; await db.saveUser(uid, u);
+    if (tu) {
+      tu.custom_global_rate = val;
+      await db.saveUser(tu.uid, tu);
+      await tg.sendMessage(chatId, `✅ VIP global rate (all services) for <code>${tu.uid}</code> set to <b>৳${val.toFixed(2)} BDT</b>!`, { reply_markup: ikb([[btn("🎁 Manage User Rewards", { callback_data: `adm_user_reward|${tu.uid}` })]]) });
     }
   } else if (pa.action === "adm_user_bal" && isAdminUser(uid, env, walletConfig)) {
     const amt = parseFloat(text);
