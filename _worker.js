@@ -1492,10 +1492,30 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       } else if (data === "adm_reward_menu") {
         const kb = ikb([
           [btn("🌐 All Users Service Rates", { callback_data: "adm_rate_settings", style: "success" })],
-          [btn("👤 Specific User Reward (Search)", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("👤 Specific User Rewards (VIP List)", { callback_data: "adm_vip_users_menu", style: "primary" })],
           [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, "🎁 <b>Reward Management</b>\n\nSet global service rewards for all users, or search a specific user to give VIP custom rates:", kb);
+        await tg.safeEditMessage(chatId, msgId, "🎁 <b>Reward Management</b>\n\nSet global service rewards for all users, or view/add/remove specific VIP user rewards:", kb);
+      } else if (data === "adm_vip_users_menu") {
+        const { results } = await db.d1.prepare("SELECT uid, name, username, extra FROM users WHERE extra LIKE '%custom_rates%' OR extra LIKE '%custom_global_rate%'").all();
+        const vipRows = [];
+        for (const r of results || []) {
+          const ex = JSON.parse(r.extra || "{}");
+          const hasGlobal = ex.custom_global_rate !== undefined && ex.custom_global_rate !== null;
+          const hasSvc = ex.custom_rates && Object.keys(ex.custom_rates).length > 0;
+          if (!hasGlobal && !hasSvc) continue;
+          const rateSummary = hasGlobal ? `৳${Number(ex.custom_global_rate).toFixed(2)}` : Object.entries(ex.custom_rates).map(([k, v]) => `${k}:${v}`).join(", ");
+          vipRows.push([
+            btn(`🌟 ${r.name || r.uid} (${rateSummary})`, { callback_data: `adm_user_reward|${r.uid}`, style: "primary" }),
+            btn("❌ Remove", { callback_data: `adm_u_rate_reset|${r.uid}`, style: "danger" }),
+          ]);
+        }
+        vipRows.push([btn("🔍 Search & Add VIP User (ID / @username)", { callback_data: "adm_search_user", style: "success" })]);
+        vipRows.push([btn("🔙 Back", { callback_data: "adm_reward_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        const txt = vipRows.length > 2
+          ? `👤 <b>Specific User Rewards (${vipRows.length - 2} VIP Users)</b>\n\nTap a user to edit their rates, or tap <b>❌ Remove</b> to reset to default:`
+          : "👤 <b>Specific User Rewards</b>\n\n<i>No VIP custom rewards set yet. Tap Search below to add a user!</i>";
+        await tg.safeEditMessage(chatId, msgId, txt, ikb(vipRows));
       } else if (data.startsWith("adm_user_reward|")) {
         const tUid = data.split("|")[1], tu = await db.getUser(tUid);
         if (!tu) return new Response("OK");
@@ -1519,7 +1539,7 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       } else if (data.startsWith("adm_u_rate_reset|")) {
         const tUid = data.split("|")[1], tu = await db.getUser(tUid);
         if (tu) { delete tu.custom_rates; delete tu.custom_global_rate; await db.saveUser(tUid, tu); }
-        await tg.safeEditMessage(chatId, msgId, `✅ Reset custom rewards for <code>${tUid}</code> to default global rates.`, ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
+        await tg.safeEditMessage(chatId, msgId, `✅ Reset custom rewards for <code>${tUid}</code> to default global rates.`, ikb([[btn("👥 VIP List", { callback_data: "adm_vip_users_menu" }), btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
       } else if (data.startsWith("adm_user_bal|")) {
         const [, mode, tUid] = data.split("|"), u = await db.getUser(uid);
         if (u) { u.pending_action = { action: "adm_user_bal", mode, target_uid: tUid }; await db.saveUser(uid, u); }
@@ -1655,6 +1675,7 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const svc = data.split("|")[1], provs = await db.getProviders();
         const rows = provs.map((p) => [btn(p, { callback_data: `adm_add_prov|${svc}|${p}` })]);
         rows.push([btn("Default (No Provider)", { callback_data: `adm_add_prov|${svc}|` })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_add", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         await tg.safeEditMessage(chatId, msgId, `📦 <b>Select Provider for ${escapeHtml(svc)}:</b>`, ikb(rows));
       } else if (data.startsWith("adm_add_prov|")) {
         const [, svc, prov] = data.split("|");
@@ -1699,7 +1720,7 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       } else if (data === "adm_stats") {
         const [totU, sum, evs] = await Promise.all([db.countUsers(), db.getAllNumbersSummary(), db.getOtpEventsSince(nowTs() - 86400, 5000)]);
         let totN = 0; for (const cm of Object.values(sum)) for (const c of Object.values(cm)) totN += c;
-        await tg.safeEditMessage(chatId, msgId, `<blockquote>📊 <b>Stats</b>\n👥 Users: ${totU}\n📱 Numbers: ${totN}\n🔐 OTPs (24h): ${evs.length}</blockquote>`, adminPanelKb(uid, env, walletConfig));
+        await tg.safeEditMessage(chatId, msgId, `<blockquote>📊 <b>Stats</b>\n👥 Users: ${totU}\n📱 Numbers: ${totN}\n🔐 OTPs (24h): ${evs.length}</blockquote>`, ikb([[btn("🔄 Refresh", { callback_data: "adm_stats", style: "primary" })], [btn("🔙 Back", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       } else if (data === "adm_withdraw_requests") {
         const list = await db.getWithdrawals("pending_manual", null, 10);
         if (!list.length) await tg.sendMessage(chatId, "✅ No pending withdrawals.");
@@ -1717,6 +1738,7 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         }
       } else if (data === "adm_rate_settings") {
         const rows = Object.keys(platforms).map((s) => [btn(`${s} (৳${walletConfig.service_rates?.[s]?.global ?? 0.5})`, { callback_data: `adm_rate_svc|${s}` })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_reward_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         await tg.safeEditMessage(chatId, msgId, "💵 <b>Select Service:</b>", ikb(rows));
       } else if (data.startsWith("adm_rate_svc|")) {
         const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_rate", service: data.split("|")[1] }; await db.saveUser(uid, u); }
