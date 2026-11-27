@@ -640,16 +640,29 @@ class BotDB {
     for (const sql of SCHEMA_STATEMENTS) await this.d1.prepare(sql).run();
   }
   async preloadCore(uid = null) {
+    const now = Date.now();
+    const mem = globalThis._kvMemCache;
+    const memValid = mem && (now - mem.ts < 15000);
+    if (memValid) {
+      for (const [k, v] of Object.entries(mem.data)) this._cache.set(k, v);
+      if (uid) {
+        const uRow = await this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(String(uid)).first();
+        this._userCache.set(String(uid), this._rowToUser(uRow));
+      }
+      return;
+    }
     const kvPromise = this.d1.prepare("SELECT key, value FROM kv_store WHERE key IN ('wallet_config', 'platforms', 'providers', 'leaderboard')").all();
     const userPromise = uid ? this.d1.prepare("SELECT * FROM users WHERE uid = ?").bind(String(uid)).first() : Promise.resolve(null);
     const [kvRes, uRow] = await Promise.all([kvPromise, userPromise]);
+    const memData = {};
     for (const row of kvRes?.results || []) {
-      try { this._cache.set(row.key, JSON.parse(row.value)); } catch {}
+      try { const p = JSON.parse(row.value); this._cache.set(row.key, p); memData[row.key] = p; } catch {}
     }
-    if (!this._cache.has("wallet_config")) this._cache.set("wallet_config", JSON.parse(JSON.stringify(DEFAULT_WALLET_CONFIG)));
-    if (!this._cache.has("platforms")) this._cache.set("platforms", JSON.parse(JSON.stringify(DEFAULT_PLATFORMS)));
-    if (!this._cache.has("providers")) this._cache.set("providers", ["RX SMS"]);
-    if (!this._cache.has("leaderboard")) this._cache.set("leaderboard", JSON.parse(JSON.stringify(DEFAULT_LEADERBOARD)));
+    if (!this._cache.has("wallet_config")) { const d = JSON.parse(JSON.stringify(DEFAULT_WALLET_CONFIG)); this._cache.set("wallet_config", d); memData.wallet_config = d; }
+    if (!this._cache.has("platforms")) { const d = JSON.parse(JSON.stringify(DEFAULT_PLATFORMS)); this._cache.set("platforms", d); memData.platforms = d; }
+    if (!this._cache.has("providers")) { this._cache.set("providers", ["RX SMS"]); memData.providers = ["RX SMS"]; }
+    if (!this._cache.has("leaderboard")) { const d = JSON.parse(JSON.stringify(DEFAULT_LEADERBOARD)); this._cache.set("leaderboard", d); memData.leaderboard = d; }
+    globalThis._kvMemCache = { ts: now, data: memData };
     if (uid) this._userCache.set(String(uid), this._rowToUser(uRow));
   }
   async getKV(key, fallback = null) {
@@ -663,6 +676,10 @@ class BotDB {
   }
   async setKV(key, val) {
     this._cache.set(key, val);
+    if (globalThis._kvMemCache?.data) {
+      globalThis._kvMemCache.data[key] = val;
+      globalThis._kvMemCache.ts = Date.now();
+    }
     await this.d1.prepare("INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").bind(key, JSON.stringify(val), nowTs()).run();
   }
   async getWalletConfig() {
@@ -1373,10 +1390,28 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       } else if (data === "adm_menu_users") {
         const kb = ikb([
           [btn("🔍 Search User (ID / @username)", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("👥 All Users", { callback_data: "adm_all_users|0", style: "primary" })],
           [btn("📋 Recent Users", { callback_data: "adm_recent_users", style: "primary" })],
           [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, "👥 <b>User Management</b>\n\nSearch a user by ID or @username to manage balance or ban/unban:", kb);
+        await tg.safeEditMessage(chatId, msgId, "👥 <b>User Management</b>\n\nSearch or browse all users to manage balance or ban/unban:", kb);
+      } else if (data.startsWith("adm_all_users|")) {
+        const page = Math.max(0, parseInt(data.split("|")[1] || "0", 10));
+        const limit = 10, offset = page * limit;
+        const [totalCnt, { results }] = await Promise.all([
+          db.countUsers(),
+          db.d1.prepare("SELECT uid, name, username, balance, extra FROM users ORDER BY joined DESC LIMIT ? OFFSET ?").bind(limit, offset).all(),
+        ]);
+        const rows = (results || []).map((r) => {
+          const ex = JSON.parse(r.extra || "{}");
+          return [btn(`${ex.banned ? "🚫" : "👤"} ${r.name || r.uid} (${r.uid}) • ৳${Number(r.balance || 0).toFixed(1)}`, { callback_data: `adm_view_user|${r.uid}` })];
+        });
+        const nav = [];
+        if (page > 0) nav.push(btn("⬅️ Prev", { callback_data: `adm_all_users|${page - 1}`, style: "primary" }));
+        if (offset + limit < totalCnt) nav.push(btn("➡️ Next", { callback_data: `adm_all_users|${page + 1}`, style: "primary" }));
+        if (nav.length) rows.push(nav);
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, `👥 <b>All Users (${totalCnt})</b> — Page ${page + 1}`, ikb(rows));
       } else if (data === "adm_recent_users") {
         const { results } = await db.d1.prepare("SELECT uid, name, username, balance, extra FROM users ORDER BY last_seen DESC LIMIT 10").all();
         const rows = (results || []).map((r) => {
@@ -1391,9 +1426,10 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const stTxt = tu.banned ? "🚫 <b>BANNED</b>" : "🟢 <b>Active</b>";
         const msgTxt = `<blockquote>👤 <b>User Management</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`;
         const kb = ikb([
-          [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" }), btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+          [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" })],
+          [btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
           [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
-          [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_toggle|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
+          [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_confirm|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
           [btn("🔙 Back", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
         await tg.safeEditMessage(chatId, msgId, msgTxt, kb);
@@ -1412,6 +1448,15 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const tUid = data.split("|")[1], tu = await db.getUser(tUid);
         if (tu) { tu.balance = 0; await db.saveUser(tUid, tu); }
         await tg.safeEditMessage(chatId, msgId, `✅ Balance of <code>${tUid}</code> reset to <b>৳0.00 BDT</b>.`, ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
+      } else if (data.startsWith("adm_user_ban_confirm|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (!tu) return new Response("OK");
+        const actLabel = tu.banned ? "Unban" : "Ban";
+        const kb = ikb([
+          [btn(`✅ Yes, ${actLabel} User`, { callback_data: `adm_user_ban_toggle|${tUid}`, style: tu.banned ? "success" : "danger" })],
+          [btn("🔙 Cancel", { callback_data: `adm_view_user|${tUid}`, style: "primary" })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `⚠️ <b>Confirm ${actLabel}</b>\n\nAre you sure you want to <b>${actLabel.toLowerCase()}</b> user <code>${tUid}</code> (${escapeHtml(tu.name)})?`, kb);
       } else if (data.startsWith("adm_user_ban_toggle|")) {
         const tUid = data.split("|")[1], tu = await db.getUser(tUid);
         if (tu) {
@@ -1484,7 +1529,12 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_otp_source_id" }; await db.saveUser(uid, u); }
         await tg.sendMessage(chatId, "🆔 Send the <b>OTP Source Group/Channel Chat ID</b> (e.g. <code>-1003888145264</code>):\nSend /cancel to abort.");
       }
-      else if (data === "adm_menu_system") await tg.safeEditMessage(chatId, msgId, "⚙️ <b>System</b>", ikb([[btn("Export Backup", { callback_data: "adm_backup_export" }), btn("Cleanup Now", { callback_data: "adm_cleanup_now", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_system") await tg.safeEditMessage(chatId, msgId, "⚙️ <b>System & Security</b>\n\nExport or import full bot data (Users, Balances, Wallets, Settings, Withdrawals & OTP History):", ikb([
+        [btn("📦 Export Full Backup (.json)", { callback_data: "adm_backup_export", style: "primary" })],
+        [btn("📥 Import Backup (.json)", { callback_data: "adm_backup_import", style: "success" })],
+        [btn("🗑️ Cleanup Now", { callback_data: "adm_cleanup_now", style: "danger" })],
+        [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+      ]));
       else if (data === "adm_add") {
         const rows = Object.keys(platforms).map((p) => [btn(p, { callback_data: `adm_add_svc|${p}` })]);
         rows.push([btn("Back", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
@@ -1572,11 +1622,32 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         const cnt = await pollOtpInboxApis(db, tg, walletConfig, platforms, true);
         await tg.sendMessage(chatId, `🔄 Polled APIs. Delivered: <b>${cnt}</b>`);
       } else if (data === "adm_backup_export") {
-        const bytes = new TextEncoder().encode(JSON.stringify({ exported_at: nowTs(), users: await db.getAllUsers(), wallet_config: walletConfig, platforms }, null, 2));
-        await tg.sendDocument(chatId, bytes, `backup_${nowTs()}.json`, "📦 D1 Backup");
+        const [allUsers, wdRes, otpRes, providers, leaderboard] = await Promise.all([
+          db.getAllUsers(),
+          db.d1.prepare("SELECT * FROM withdrawals").all(),
+          db.d1.prepare("SELECT ts, country, service, user_id, inbox, number, code, sms, digits, lang, duplicate FROM otp_events ORDER BY id DESC LIMIT 10000").all(),
+          db.getProviders(),
+          db.getLeaderboard(),
+        ]);
+        const payload = {
+          exported_at: nowTs(),
+          version: 2,
+          users: allUsers,
+          withdrawals: wdRes?.results || [],
+          otp_events: otpRes?.results || [],
+          wallet_config: walletConfig,
+          platforms,
+          providers,
+          leaderboard,
+        };
+        const bytes = new TextEncoder().encode(JSON.stringify(payload, null, 2));
+        await tg.sendDocument(chatId, bytes, `bot_full_backup_${nowTs()}.json`, `📦 <b>Full D1 Backup</b>\n👥 Users: ${Object.keys(allUsers).length}\n💳 Withdrawals: ${(wdRes?.results || []).length}\n📩 OTP Events: ${(otpRes?.results || []).length}`);
+      } else if (data === "adm_backup_import") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_backup_import" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "📥 <b>Import Backup</b>\n\nUpload your previously exported <code>.json</code> backup file to restore all users, balances, wallets, settings, and history.\n\nSend /cancel to abort.");
       } else if (data === "adm_cleanup_now") {
-        await db.cleanupExpiredSold(); await db.cleanupOldOtpEvents(); await db.cleanupSeenApiMsgs();
-        await tg.safeEditMessage(chatId, msgId, "✅ Cleanup done.", adminPanelKb(uid, env, walletConfig));
+        await Promise.all([db.cleanupExpiredSold(), db.cleanupSeenApiMsgs()]);
+        await tg.safeEditMessage(chatId, msgId, "✅ Expired sold numbers & API cache cleaned (OTP history preserved).", adminPanelKb(uid, env, walletConfig));
       }
     }
     return new Response("OK");
@@ -1616,7 +1687,11 @@ async function handleTelegramUpdate(update, env, ctx = null) {
           if (rU && rId !== uid) { u.referred_by = rId; rU.referral_count = (rU.referral_count || 0) + 1; await db.saveUser(rId, rU); }
         }
         await db.saveUser(uid, u);
-      } else { u.last_seen = nowTs(); u.name = name; await db.saveUser(uid, u); }
+      } else {
+        u.last_seen = nowTs(); u.name = name;
+        const p = db.saveUser(uid, u);
+        if (ctx?.waitUntil) ctx.waitUntil(p); else await p;
+      }
       if (arg.startsWith("d_")) {
         const p = arg.slice(2), idx = p.indexOf("_");
         if (idx > 0) { await deliverNumbersToUser(db, tg, chatId, null, uid, normalizeServiceName(p.slice(0, idx)), p.slice(idx + 1), walletConfig, platforms, ctx); return new Response("OK"); }
@@ -1693,6 +1768,63 @@ async function handleTelegramUpdate(update, env, ctx = null) {
   // Pending actions & file upload
   const u = await db.getUser(uid), pa = u?.pending_action;
   if (!pa) return new Response("OK");
+
+  if (msg.document && pa.action === "adm_backup_import" && isAdminUser(uid, env, walletConfig)) {
+    const f = await tg.getFile(msg.document.file_id);
+    if (!f.ok) { await tg.sendMessage(chatId, "❌ Failed to fetch file from Telegram."); return new Response("OK"); }
+    try {
+      const bytes = await tg.downloadFile(f.result.file_path);
+      const data = JSON.parse(new TextDecoder().decode(bytes));
+      let uCount = 0, wCount = 0, oCount = 0;
+
+      if (data.wallet_config) await db.saveWalletConfig(data.wallet_config);
+      if (data.platforms) await db.savePlatforms(data.platforms);
+      if (data.providers) await db.saveProviders(data.providers);
+      if (data.leaderboard) await db.saveLeaderboard(data.leaderboard);
+
+      if (data.users && typeof data.users === "object") {
+        const entries = Object.entries(data.users);
+        const known = new Set(["uid", "name", "username", "joined", "last_seen", "balance", "referred_by", "referral_count", "referral_earnings", "referred_users", "service", "country", "pending_action", "wallets", "otps", "auto_withdraw_history"]);
+        const stmt = db.d1.prepare(`INSERT INTO users (uid, name, username, joined, last_seen, balance, referred_by, referral_count, referral_earnings, referred_users, service, country, pending_action, wallets, otps, auto_withdraw_history, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(uid) DO UPDATE SET name=excluded.name, username=excluded.username, joined=excluded.joined, last_seen=excluded.last_seen, balance=excluded.balance, referred_by=excluded.referred_by, referral_count=excluded.referral_count, referral_earnings=excluded.referral_earnings, referred_users=excluded.referred_users, service=excluded.service, country=excluded.country, wallets=excluded.wallets, otps=excluded.otps, auto_withdraw_history=excluded.auto_withdraw_history, extra=excluded.extra`);
+        for (let i = 0; i < entries.length; i += 40) {
+          const batch = entries.slice(i, i + 40).map(([k, uObj]) => {
+            const extra = {};
+            for (const [ek, ev] of Object.entries(uObj || {})) if (!known.has(ek)) extra[ek] = ev;
+            return stmt.bind(String(uObj.uid || k), uObj.name || "", uObj.username || "", uObj.joined || 0, uObj.last_seen || 0, Number(uObj.balance || 0), uObj.referred_by ? String(uObj.referred_by) : null, Number(uObj.referral_count || 0), Number(uObj.referral_earnings || 0), JSON.stringify(uObj.referred_users || []), uObj.service || "Facebook", uObj.country || "", null, JSON.stringify(uObj.wallets || {}), JSON.stringify(uObj.otps || {}), JSON.stringify(uObj.auto_withdraw_history || {}), JSON.stringify(extra));
+          });
+          await db.d1.batch(batch);
+          uCount += batch.length;
+        }
+      }
+
+      if (Array.isArray(data.withdrawals) && data.withdrawals.length) {
+        const wStmt = db.d1.prepare("INSERT OR IGNORE INTO withdrawals (id, user_id, method, amount, account, status, ts, type, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        for (let i = 0; i < data.withdrawals.length; i += 50) {
+          const batch = data.withdrawals.slice(i, i + 50).map((w) => wStmt.bind(String(w.id), String(w.user_id), w.method || "", Number(w.amount || 0), w.account || "", w.status || "completed", w.ts || 0, w.type || "manual", w.extra || "{}"));
+          await db.d1.batch(batch);
+          wCount += batch.length;
+        }
+      }
+
+      if (Array.isArray(data.otp_events) && data.otp_events.length) {
+        const existingOtp = await db.d1.prepare("SELECT COUNT(*) as cnt FROM otp_events").first();
+        if (!existingOtp || Number(existingOtp.cnt) === 0) {
+          const oStmt = db.d1.prepare("INSERT INTO otp_events (ts, country, service, user_id, inbox, number, code, sms, digits, lang, duplicate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+          for (let i = 0; i < data.otp_events.length; i += 50) {
+            const batch = data.otp_events.slice(i, i + 50).map((ev) => oStmt.bind(ev.ts || 0, ev.country || "", ev.service || "", ev.user_id ? String(ev.user_id) : null, ev.inbox ? 1 : 0, ev.number || "", ev.code || "", ev.sms || "", ev.digits || 0, ev.lang || "", ev.duplicate ? 1 : 0));
+            await db.d1.batch(batch);
+            oCount += batch.length;
+          }
+        }
+      }
+
+      u.pending_action = null; await db.saveUser(uid, u);
+      await tg.sendMessage(chatId, `✅ <b>Backup Restored Successfully!</b>\n\n👥 <b>Users Restored:</b> ${uCount}\n💳 <b>Withdrawals Restored:</b> ${wCount}\n📩 <b>OTP Events Restored:</b> ${oCount}\n⚙️ <b>Settings, Services &amp; Leaderboard Restored!</b>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+    } catch (err) {
+      await tg.sendMessage(chatId, `❌ <b>Import Failed:</b> ${escapeHtml(err.message)}`);
+    }
+    return new Response("OK");
+  }
 
   if (msg.document && pa.action === "add_numbers_upload" && isAdminUser(uid, env, walletConfig)) {
     const f = await tg.getFile(msg.document.file_id);
@@ -1780,9 +1912,10 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     else {
       const tu = found[0], stTxt = tu.banned ? "🚫 <b>BANNED</b>" : "🟢 <b>Active</b>";
       const kb = ikb([
-        [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" }), btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+        [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" })],
+        [btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
         [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
-        [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_toggle|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
+        [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_confirm|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
       ]);
       await tg.sendMessage(chatId, `<blockquote>👤 <b>User Found</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`, { reply_markup: kb });
     }
@@ -1875,6 +2008,26 @@ export default {
       const polled = await pollOtpInboxApis(db, tg, await db.getWalletConfig(), await db.getPlatforms(), false);
       await db.cleanupExpiredSold(); await db.cleanupSeenApiMsgs();
       return new Response(JSON.stringify({ ok: true, polled }), { headers: { "Content-Type": "application/json" } });
+    }
+
+    if (request.method === "POST" && path === "/api/otp") {
+      const secret = url.searchParams.get("secret") || request.headers.get("x-cron-secret") || "";
+      if (env.CRON_SECRET && secret !== env.CRON_SECRET) return new Response("Unauthorized", { status: 401 });
+      if (!env.BOT_TOKEN || !env.DB) return new Response("Missing BOT_TOKEN or DB", { status: 500 });
+      try {
+        const body = await request.json();
+        const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
+        await db.preloadCore();
+        const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
+        const rawNum = String(body.number || "").trim();
+        const rawSms = String(body.sms || body.message || "");
+        const rawSvc = normalizeServiceName(body.service || "Unknown");
+        const rawCode = String(body.code || extractOtpCode(rawSms, [rawNum]) || "N/A");
+        const delivered = await deliverVerifiedOtp(db, tg, walletConfig, platforms, rawNum, rawSvc, rawCode, rawSms);
+        return new Response(JSON.stringify({ ok: true, delivered }), { headers: { "Content-Type": "application/json" } });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), { status: 400, headers: { "Content-Type": "application/json" } });
+      }
     }
 
     if (request.method === "POST" && (path === "/webhook" || path === "/telegram-webhook" || path === "/")) {
