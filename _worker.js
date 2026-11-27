@@ -869,20 +869,20 @@ class BotDB {
 function mainMenuKb(isAdmin = false) {
   const rows = [
     [
-      { text: "Get Number", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number, style: "primary" },
-      { text: "Live Traffic", icon_custom_emoji_id: "6084477132254218612", style: "primary" },
+      { text: "📞 Get Number", style: "primary" },
+      { text: "📊 Live Traffic", style: "primary" },
     ],
     [
-      { text: "My Wallet", icon_custom_emoji_id: "5190576863226933563", style: "primary" },
-      { text: "Leaderboard", icon_custom_emoji_id: "6266973397922616654", style: "primary" },
+      { text: "💰 My Wallet", style: "primary" },
+      { text: "🏆 Leaderboard", style: "primary" },
     ],
     [
-      { text: "Profile Status", icon_custom_emoji_id: CUSTOM_EMOJIS.user, style: "primary" },
-      { text: "Support", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro, style: "primary" },
+      { text: "👤 Profile Status", style: "primary" },
+      { text: "💬 Support", style: "primary" },
     ],
   ];
   if (isAdmin) {
-    rows.push([{ text: "Admin Panel", icon_custom_emoji_id: CUSTOM_EMOJIS.shield, style: "primary" }]);
+    rows.push([{ text: "👑 Admin Panel", style: "primary" }]);
   }
   return rkb(rows);
 }
@@ -921,17 +921,17 @@ function walletViewKb(walletConfig) {
 }
 function adminPanelKb(uid, env, walletConfig) {
   const isSup = isSuperAdmin(uid, env), rows = [], m = [];
-  if (isSup) rows.push([btn("Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
-  if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
-  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
-  if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
-  if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("Platforms & Providers", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
+  if (isSup) rows.push([btn("👑 Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
+  if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
+  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
+  if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("💰 Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
+  if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("🌐 Platforms & Providers", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
   if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) {
-    m.push(btn("Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
+    m.push(btn("📢 Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
     m.push(btn("🔒 Force Join Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings }));
   }
-  if (isSup || hasPermission(uid, "otp_inbox", env, walletConfig)) m.push(btn("OTP System & Inbox", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_settings }));
-  if (isSup || hasPermission(uid, "control", env, walletConfig)) m.push(btn("System & Security", { callback_data: "adm_menu_system", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }));
+  if (isSup || hasPermission(uid, "otp_inbox", env, walletConfig)) m.push(btn("📥 OTP System & Inbox", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_settings }));
+  if (isSup || hasPermission(uid, "control", env, walletConfig)) m.push(btn("⚙️ System & Security", { callback_data: "adm_menu_system", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }));
   for (let i = 0; i < m.length; i += 2) rows.push(m.slice(i, i + 2));
   return ikb(rows);
 }
