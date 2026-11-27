@@ -925,7 +925,8 @@ function adminPanelKb(uid, env, walletConfig) {
   if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
   if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
   if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) m.push(btn("💰 Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
-  if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("🌐 Platforms & Providers", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
+  if (isSup || hasPermission(uid, "platforms", env, walletConfig)) m.push(btn("🌐 Platforms & Services", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.folder }));
+  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("👥 User Management", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.users }));
   if (isSup || hasPermission(uid, "broadcast", env, walletConfig)) {
     m.push(btn("📢 Broadcast & Channels", { callback_data: "adm_menu_broadcast", icon_custom_emoji_id: CUSTOM_EMOJIS.broadcast }));
     m.push(btn("🔒 Force Join Channels", { callback_data: "adm_channels_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.channel_settings }));
@@ -1014,7 +1015,7 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
     db.getUser(uid),
   ]);
   if (!popped.length) {
-    const kb = ikb([[btn("Back", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]);
+    const kb = ikb([[btn("🔙 Back", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]);
     const m = `❌ No numbers left for <b>${svc}</b> (${getCountryDisplayName(ccode)}).`;
     if (msgId) await tg.safeEditMessage(chatId, msgId, m, kb); else await tg.sendMessage(chatId, m, { reply_markup: kb });
     return;
@@ -1038,11 +1039,11 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
   const msgHtml = `<blockquote><b>╭──────── ⋆⋅☆⋅⋆ ────────╮</b>\n<b>  ${getCountryFlagEmoji(dial)} ${getCountryDisplayName(ccode)} Fresh Number</b>\n<b>   ${getPlatformEmojiHtml(svc, platforms)} ${svc} • <tg-emoji emoji-id="5978841844673416652">⏳</tg-emoji> ${NUMBER_VALIDITY_SECONDS / 60}M</b>\n<b>   <tg-emoji emoji-id="6282702779341346176">🔄</tg-emoji> Refreshed: ${new Date().toLocaleTimeString("en-US", { hour12: true })}</b>\n<b>╰──────── ⋆⋅☆⋅⋆ ────────╯</b></blockquote>`;
   const rows = fullNums.map((n) => [btn(n, { copy_text: n, icon_custom_emoji_id: CUSTOM_EMOJIS.number_copy, style: "success" })]);
   const rowB = [];
-  if (rem.length) rowB.push(btn("Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
-  rowB.push(btn("Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
+  if (rem.length) rowB.push(btn("🔄 Change Number", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
+  rowB.push(btn("🌍 Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
   rows.push(rowB);
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
-  rows.push([btn("OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
+  rows.push([btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
   if (msgId) await tg.safeEditMessage(chatId, msgId, msgHtml, ikb(rows)); else await tg.sendMessage(chatId, msgHtml, { reply_markup: ikb(rows) });
 }
 
@@ -1254,6 +1255,19 @@ async function handleTelegramUpdate(update, env, ctx = null) {
   await db.preloadCore(actorUid);
   const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
 
+  // Ban check for non-admin users
+  if (actorUid && !isAdminUser(actorUid, env, walletConfig)) {
+    const actorU = await db.getUser(actorUid);
+    if (actorU?.banned) {
+      if (update.callback_query) {
+        await tg.answerCallbackQuery(update.callback_query.id, "🚫 Your account is banned.").catch(() => {});
+      } else if (update.message?.chat?.type === "private") {
+        await tg.sendMessage(update.message.chat.id, "🚫 <b>Your account has been banned by Admin.</b>");
+      }
+      return new Response("OK");
+    }
+  }
+
   if (update.callback_query) {
     const call = update.callback_query, data = call.data || "", uid = String(call.from.id), chatId = call.message?.chat?.id || uid, msgId = call.message?.message_id;
     const ackP = tg.answerCallbackQuery(call.id).catch(() => {});
@@ -1322,7 +1336,90 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       await tg.sendMessage(chatId, "💬 Send your message for Admin Support (or /cancel):");
     } else if (isAdminUser(uid, env, walletConfig)) {
       if (data === "adm_panel") await tg.safeEditMessage(chatId, msgId, "👑 <b>Admin Control Hub</b>", adminPanelKb(uid, env, walletConfig));
-      else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("🌍 Manage Countries", { callback_data: "adm_countries_menu" }), btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_platforms") await tg.safeEditMessage(chatId, msgId, "🌐 <b>Platforms, Services & Providers</b>", ikb([[btn("🌐 Manage Services", { callback_data: "adm_platforms_menu", style: "success" }), btn("📦 Manage Providers", { callback_data: "adm_providers_menu" })], [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_platforms_menu") {
+        const rows = Object.keys(platforms).map((p) => [btn(`🗑️ ${p}`, { callback_data: `adm_del_plat_confirm|${p}`, style: "danger" })]);
+        rows.push([btn("➕ Add New Service", { callback_data: "adm_add_platform", style: "success" })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, `🌐 <b>Manage Services (${Object.keys(platforms).length})</b>\nTap a service to delete it, or add a new one:`, ikb(rows));
+      } else if (data === "adm_add_platform") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_add_platform" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "🌐 Send the new <b>Service Name</b> (e.g. <code>Discord</code>, <code>Snapchat</code>, <code>PayPal</code>):\nSend /cancel to abort.");
+      } else if (data.startsWith("adm_del_plat_confirm|")) {
+        const svc = data.split("|")[1];
+        const kb = ikb([
+          [btn(`✅ Yes, Delete ${svc}`, { callback_data: `adm_del_plat|${svc}`, style: "danger" })],
+          [btn("🔙 Cancel", { callback_data: "adm_platforms_menu", style: "primary" })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `⚠️ <b>Confirm Delete Service</b>\n\nAre you sure you want to delete <b>${escapeHtml(svc)}</b>?\n<i>All available numbers under this service will also be removed!</i>`, kb);
+      } else if (data.startsWith("adm_del_plat|")) {
+        const svc = data.split("|")[1];
+        delete platforms[svc];
+        await Promise.all([db.savePlatforms(platforms), db.removeNumbersByService(svc)]);
+        await tg.safeEditMessage(chatId, msgId, `✅ Deleted service <b>${escapeHtml(svc)}</b> and its numbers.`, adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_providers_menu") {
+        const provs = await db.getProviders();
+        const rows = provs.map((p) => [btn(`❌ ${p}`, { callback_data: `adm_del_prov|${p}`, style: "danger" })]);
+        rows.push([btn("➕ Add Provider", { callback_data: "adm_add_provider", style: "success" })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_platforms", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, "📦 <b>Manage Providers</b>", ikb(rows));
+      } else if (data === "adm_add_provider") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_add_provider" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "📦 Enter new <b>Provider Name</b> (or /cancel):");
+      } else if (data.startsWith("adm_del_prov|")) {
+        const p = data.split("|")[1], provs = (await db.getProviders()).filter((x) => x !== p);
+        await db.saveProviders(provs);
+        await tg.safeEditMessage(chatId, msgId, `✅ Deleted provider <b>${escapeHtml(p)}</b>.`, adminPanelKb(uid, env, walletConfig));
+      } else if (data === "adm_menu_users") {
+        const kb = ikb([
+          [btn("🔍 Search User (ID / @username)", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("📋 Recent Users", { callback_data: "adm_recent_users", style: "primary" })],
+          [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, "👥 <b>User Management</b>\n\nSearch a user by ID or @username to manage balance or ban/unban:", kb);
+      } else if (data === "adm_recent_users") {
+        const { results } = await db.d1.prepare("SELECT uid, name, username, balance, extra FROM users ORDER BY last_seen DESC LIMIT 10").all();
+        const rows = (results || []).map((r) => {
+          const ex = JSON.parse(r.extra || "{}");
+          return [btn(`${ex.banned ? "🚫" : "👤"} ${r.name || r.uid} (৳${Number(r.balance || 0).toFixed(1)})`, { callback_data: `adm_view_user|${r.uid}` })];
+        });
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        await tg.safeEditMessage(chatId, msgId, "📋 <b>Recent Users (Top 10)</b>", ikb(rows));
+      } else if (data.startsWith("adm_view_user|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (!tu) { await tg.safeEditMessage(chatId, msgId, "❌ User not found.", adminPanelKb(uid, env, walletConfig)); return new Response("OK"); }
+        const stTxt = tu.banned ? "🚫 <b>BANNED</b>" : "🟢 <b>Active</b>";
+        const msgTxt = `<blockquote>👤 <b>User Management</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`;
+        const kb = ikb([
+          [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" }), btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+          [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
+          [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_toggle|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
+          [btn("🔙 Back", { callback_data: "adm_menu_users", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, msgTxt, kb);
+      } else if (data.startsWith("adm_user_bal|")) {
+        const [, mode, tUid] = data.split("|"), u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "adm_user_bal", mode, target_uid: tUid }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `💰 Enter BDT amount to ${mode === "add" ? "<b>ADD</b> to" : "<b>DEDUCT</b> from"} user <code>${tUid}</code> (or /cancel):`);
+      } else if (data.startsWith("adm_user_zero_confirm|")) {
+        const tUid = data.split("|")[1];
+        const kb = ikb([
+          [btn("✅ Yes, Set Balance to ৳0", { callback_data: `adm_user_zero|${tUid}`, style: "danger" })],
+          [btn("🔙 Cancel", { callback_data: `adm_view_user|${tUid}`, style: "primary" })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `⚠️ Reset balance of user <code>${tUid}</code> to <b>৳0.00 BDT</b>?`, kb);
+      } else if (data.startsWith("adm_user_zero|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (tu) { tu.balance = 0; await db.saveUser(tUid, tu); }
+        await tg.safeEditMessage(chatId, msgId, `✅ Balance of <code>${tUid}</code> reset to <b>৳0.00 BDT</b>.`, ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
+      } else if (data.startsWith("adm_user_ban_toggle|")) {
+        const tUid = data.split("|")[1], tu = await db.getUser(tUid);
+        if (tu) {
+          tu.banned = !tu.banned;
+          await db.saveUser(tUid, tu);
+          await tg.safeEditMessage(chatId, msgId, `${tu.banned ? "🚫 Banned" : "✅ Unbanned"} user <code>${tUid}</code>.`, ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tUid}` })]]));
+        }
+      } else if (data === "adm_menu_numbers") await tg.safeEditMessage(chatId, msgId, "📱 <b>Numbers Management</b>", ikb([[btn("Add Numbers", { callback_data: "adm_add", style: "success" }), btn("Remove Numbers", { callback_data: "adm_remove", style: "danger" })], [btn("🌍 Manage Countries", { callback_data: "adm_countries_menu" }), btn("Clear All Numbers", { callback_data: "adm_allremove", style: "danger" })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_countries_menu") {
         const saved = walletConfig.custom_countries || [];
         const rows = saved.map((c) => {
@@ -1679,8 +1776,39 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     }
   } else if (pa.action === "adm_search_user" && isAdminUser(uid, env, walletConfig)) {
     const found = await db.findUsers(text); u.pending_action = null; await db.saveUser(uid, u);
-    if (!found.length) await tg.sendMessage(chatId, "❌ Not found.");
-    else await tg.sendMessage(chatId, `👤 ${escapeHtml(found[0].name)} (<code>${found[0].uid}</code>)\n💰 ৳${Number(found[0].balance).toFixed(2)}`);
+    if (!found.length) await tg.sendMessage(chatId, "❌ No matching user found.");
+    else {
+      const tu = found[0], stTxt = tu.banned ? "🚫 <b>BANNED</b>" : "🟢 <b>Active</b>";
+      const kb = ikb([
+        [btn("➕ Add Balance", { callback_data: `adm_user_bal|add|${tu.uid}`, style: "success" }), btn("➖ Deduct Balance", { callback_data: `adm_user_bal|sub|${tu.uid}`, style: "primary" })],
+        [btn("🔄 Reset Balance to ৳0", { callback_data: `adm_user_zero_confirm|${tu.uid}`, style: "danger" })],
+        [btn(tu.banned ? "✅ Unban User" : "🚫 Ban User", { callback_data: `adm_user_ban_toggle|${tu.uid}`, style: tu.banned ? "success" : "danger" })],
+      ]);
+      await tg.sendMessage(chatId, `<blockquote>👤 <b>User Found</b>\n\n🆔 <b>ID:</b> <code>${tu.uid}</code>\n📛 <b>Name:</b> ${escapeHtml(tu.name)}\n🔗 <b>Username:</b> ${tu.username ? "@" + escapeHtml(tu.username) : "N/A"}\n💰 <b>Balance:</b> <b>৳${Number(tu.balance || 0).toFixed(2)} BDT</b>\n📌 <b>Status:</b> ${stTxt}</blockquote>`, { reply_markup: kb });
+    }
+  } else if (pa.action === "adm_user_bal" && isAdminUser(uid, env, walletConfig)) {
+    const amt = parseFloat(text);
+    if (isNaN(amt) || amt <= 0) { await tg.sendMessage(chatId, "❌ Invalid amount. Enter a positive number or /cancel."); return new Response("OK"); }
+    const tu = await db.getUser(pa.target_uid); u.pending_action = null; await db.saveUser(uid, u);
+    if (!tu) { await tg.sendMessage(chatId, "❌ User not found."); return new Response("OK"); }
+    tu.balance = pa.mode === "add" ? Number(((tu.balance || 0) + amt).toFixed(2)) : Math.max(0, Number(((tu.balance || 0) - amt).toFixed(2)));
+    await db.saveUser(tu.uid, tu);
+    await tg.sendMessage(chatId, `✅ Updated balance for <code>${tu.uid}</code>: <b>৳${tu.balance.toFixed(2)} BDT</b>`, { reply_markup: ikb([[btn("👤 Manage User", { callback_data: `adm_view_user|${tu.uid}` })]]) });
+  } else if (pa.action === "adm_add_platform" && isAdminUser(uid, env, walletConfig)) {
+    const svc = normalizeServiceName(text.trim());
+    if (!svc) { await tg.sendMessage(chatId, "❌ Invalid service name."); return new Response("OK"); }
+    platforms[svc] = { name: svc, emoji_id: platforms[svc]?.emoji_id || "", short: svc.slice(0, 3).toUpperCase() };
+    if (!walletConfig.service_rates) walletConfig.service_rates = {};
+    if (!walletConfig.service_rates[svc]) walletConfig.service_rates[svc] = { global: 0.5, country: {} };
+    await Promise.all([db.savePlatforms(platforms), db.saveWalletConfig(walletConfig)]);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Service <b>${escapeHtml(svc)}</b> added!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+  } else if (pa.action === "adm_add_provider" && isAdminUser(uid, env, walletConfig)) {
+    const prov = text.trim();
+    const provs = await db.getProviders();
+    if (prov && !provs.includes(prov)) { provs.push(prov); await db.saveProviders(provs); }
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Provider <b>${escapeHtml(prov)}</b> added!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
   } else if (pa.action === "adm_otp_api_add" && isAdminUser(uid, env, walletConfig)) {
     const [name, url, token = ""] = text.split("|").map((s) => s.trim());
     if (name && url) {
