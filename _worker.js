@@ -849,17 +849,40 @@ class BotDB {
 
   setSupportMap(msgId, uid) { return this.d1.prepare("INSERT INTO support_map (msg_id, user_id, ts) VALUES (?, ?, ?) ON CONFLICT(msg_id) DO UPDATE SET user_id=excluded.user_id, ts=excluded.ts").bind(String(msgId), String(uid), nowTs()).run(); }
   async getSupportMap(msgId) { const r = await this.d1.prepare("SELECT user_id FROM support_map WHERE msg_id = ?").bind(String(msgId)).first(); return r ? r.user_id : null; }
+  async getUserProfileStats(uid) {
+    const sUid = String(uid), now = nowTs();
+    const [soldRow, otpRow, wdRow] = await Promise.all([
+      this.d1.prepare("SELECT COUNT(*) as cnt FROM sold WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?)").bind(sUid, now).first(),
+      this.d1.prepare("SELECT COUNT(*) as cnt FROM otp_events WHERE user_id = ? AND inbox = 1").bind(sUid).first(),
+      this.d1.prepare("SELECT COUNT(*) as cnt, COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0) as paid FROM withdrawals WHERE user_id = ?").bind(sUid).first(),
+    ]);
+    return {
+      activeNumbers: Number(soldRow?.cnt || 0),
+      totalOtps: Number(otpRow?.cnt || 0),
+      totalWithdrawals: Number(wdRow?.cnt || 0),
+      totalPaid: Number(wdRow?.paid || 0),
+    };
+  }
 }
 
 // ============ 5. KEYBOARDS ============
 function mainMenuKb(isAdmin = false) {
   const rows = [
-    [{ text: "𝐆𝐞𝐭 𝐍𝐮𝐦𝐛𝐞𝐫", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number }, { text: "𝐋𝐢𝐯𝐞 𝐓𝐫𝐚𝐟𝐟𝐢𝐜", icon_custom_emoji_id: "6084477132254218612" }],
-    [{ text: "𝐖𝐚𝐥𝐥𝐞𝐭", icon_custom_emoji_id: "5190576863226933563" }, { text: "𝐋𝐞𝐚𝐝𝐞𝐫𝐛𝐨𝐚𝐫𝐝", icon_custom_emoji_id: "6266973397922616654" }],
-    [{ text: "𝐒𝐮𝐩𝐩𝐨𝐫𝐭", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro }],
+    [
+      { text: "Get Number", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number, style: "primary" },
+      { text: "Live Traffic", icon_custom_emoji_id: "6084477132254218612", style: "primary" },
+    ],
+    [
+      { text: "My Wallet", icon_custom_emoji_id: "5190576863226933563", style: "primary" },
+      { text: "Leaderboard", icon_custom_emoji_id: "6266973397922616654", style: "primary" },
+    ],
+    [
+      { text: "Profile Status", icon_custom_emoji_id: CUSTOM_EMOJIS.user, style: "primary" },
+      { text: "Support", icon_custom_emoji_id: CUSTOM_EMOJIS.support_pro, style: "primary" },
+    ],
   ];
   if (isAdmin) {
-    rows.push([{ text: "👑 𝐀𝐝𝐦𝐢𝐧 𝐏𝐚𝐧𝐞𝐥", icon_custom_emoji_id: CUSTOM_EMOJIS.shield }]);
+    rows.push([{ text: "Admin Panel", icon_custom_emoji_id: CUSTOM_EMOJIS.shield, style: "primary" }]);
   }
   return rkb(rows);
 }
@@ -1092,6 +1115,52 @@ async function formatWalletMessage(db, uid, walletConfig) {
   const hLines = recent.map((w) => `• <b>৳${Number(w.amount).toFixed(2)}</b> via ${escapeHtml(w.method)} [<b>${w.status}</b>]`);
   return `<blockquote>${tgEmoji(CUSTOM_EMOJIS.wallet, "💰")} <b>YOUR WALLET</b>\n👤 ${escapeHtml(user.name || uid)} (<code>${uid}</code>)</blockquote>\n\n💵 <b>Balance:</b> <b>৳${bal.toFixed(2)} BDT</b> (<code>$${(bal / rate).toFixed(3)}</code>)\n👥 <b>Referrals:</b> ${user.referral_count || 0} • <b>Earned:</b> ৳${Number(user.referral_earnings || 0).toFixed(2)}\n\n<b>💳 Wallets:</b>\n${wList.join("\n")}\n\n<b>📜 Recent Withdrawals:</b>\n${hLines.length ? hLines.join("\n") : "<i>None yet</i>"}`;
 }
+async function formatProfileStatusMessage(db, uid, walletConfig, platforms) {
+  const [user, stats, lb] = await Promise.all([
+    db.getUser(uid),
+    db.getUserProfileStats(uid),
+    db.getLeaderboard(),
+  ]);
+  const u = user || {};
+  const bal = Number(u.balance || 0);
+  const usdRate = Number(walletConfig.usd_to_bdt_rate || USD_TO_BDT);
+  const joinedStr = u.joined ? new Date(u.joined * 1000).toISOString().slice(0, 16).replace("T", " ") : "N/A";
+  const seenStr = u.last_seen ? new Date(u.last_seen * 1000).toISOString().slice(0, 16).replace("T", " ") : "Now";
+  const ci = getCycleInfo(nowTs(), lb.settings || {});
+  const cycleOtps = lb.daily_stats?.[ci.cycle_key]?.[String(uid)] || 0;
+  const lvl = calculateUserLevel(lb, uid, ci.cycle_key);
+  const lvlNames = { diamond: "💎 Diamond", gold: "👑 Gold", silver: "🥈 Silver", none: "🎖 Regular" };
+  const wList = Object.entries(walletConfig.withdraw_methods || {}).map(([m]) =>
+    `  • <b>${escapeHtml(m)}:</b> ${u.wallets?.[m] ? `<code>${escapeHtml(u.wallets[m])}</code> ✅` : "<i>Not Set</i>"}`
+  );
+  const curSvc = u.service ? `${getPlatformEmojiHtml(u.service, platforms)} ${escapeHtml(u.service)}` : "None";
+  const curCty = u.country ? getCountryButtonLabel(u.country) : "None";
+  return (
+    `<blockquote>${tgEmoji(CUSTOM_EMOJIS.user, "👤")} <b>USER PROFILE STATUS</b></blockquote>\n\n` +
+    `📛 <b>Name:</b> ${escapeHtml(u.name || "User")}\n` +
+    `🔗 <b>Username:</b> ${u.username ? "@" + escapeHtml(u.username) : "<i>None</i>"}\n` +
+    `🆔 <b>User ID:</b> <code>${uid}</code>\n` +
+    `📅 <b>Joined:</b> <code>${joinedStr}</code>\n` +
+    `🕒 <b>Last Active:</b> <code>${seenStr}</code>\n\n` +
+    `💰 <b>Balance:</b> <b>৳${bal.toFixed(2)} BDT</b> (<code>$${(bal / usdRate).toFixed(3)}</code>)\n` +
+    `📩 <b>Total OTPs Received:</b> <b>${stats.totalOtps}</b>\n` +
+    `📱 <b>Active Numbers:</b> <b>${stats.activeNumbers}</b>\n` +
+    `⚙️ <b>Last Selection:</b> ${curSvc} • ${curCty}\n\n` +
+    `🏆 <b>Leaderboard Tier:</b> ${lvlNames[lvl] || "Regular"} (<b>${cycleOtps}</b> OTPs this cycle)\n` +
+    `👥 <b>Referrals:</b> <b>${u.referral_count || 0}</b> • <b>Ref Earned:</b> <b>৳${Number(u.referral_earnings || 0).toFixed(2)}</b>\n` +
+    `💸 <b>Withdrawals:</b> <b>${stats.totalWithdrawals}</b> (Paid: <b>৳${stats.totalPaid.toFixed(2)}</b>)\n\n` +
+    `<b>💳 Saved Wallets:</b>\n${wList.length ? wList.join("\n") : "  <i>None configured</i>"}`
+  );
+}
+function profileViewKb() {
+  return ikb([
+    [btn("🔄 Refresh Profile", { callback_data: "refresh_profile", icon_custom_emoji_id: CUSTOM_EMOJIS.refresh, style: "primary" })],
+    [
+      btn("💰 My Wallet", { callback_data: "refresh_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet, style: "primary" }),
+      btn("📱 Get Number", { callback_data: "get_number", icon_custom_emoji_id: CUSTOM_EMOJIS.get_number, style: "success" }),
+    ],
+  ]);
+}
 
 async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, service, otpCode, smsBody = "") {
   const cleanNum = String(number || "").replace(/[^\d]/g, "");
@@ -1211,6 +1280,8 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       await tg.safeEditMessage(chatId, msgId, await getTrafficStats(db, walletConfig), ikb([[btn("🔄 Refresh Traffic", { callback_data: "refresh_traffic" })], [btn("📱 Get Number", { callback_data: "get_number", style: "success" })]]));
     } else if (data === "refresh_wallet" || data === "wallet_back") {
       await tg.safeEditMessage(chatId, msgId, await formatWalletMessage(db, uid, walletConfig), walletViewKb(walletConfig));
+    } else if (data === "refresh_profile") {
+      await tg.safeEditMessage(chatId, msgId, await formatProfileStatusMessage(db, uid, walletConfig, platforms), profileViewKb());
     } else if (data === "set_wallet_menu") {
       const rows = Object.entries(walletConfig.withdraw_methods || {}).map(([m, d]) => [btn(`Set ${m}`, { callback_data: `set_w|${m}`, icon_custom_emoji_id: d.emoji_id || CUSTOM_EMOJIS.set_wallet })]);
       rows.push([btn("Back", { callback_data: "wallet_back", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
@@ -1460,6 +1531,11 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       await tg.sendMessage(chatId, "👑 <b>Admin Control Hub</b>", { reply_markup: adminPanelKb(uid, env, walletConfig) });
       return new Response("OK");
     }
+    if (cmd === "/profile" || cmd === "/me") {
+      if (!(await ensureMembership(uid, chatId, null, db, tg, env, walletConfig))) return new Response("OK");
+      await tg.sendMessage(chatId, await formatProfileStatusMessage(db, uid, walletConfig, platforms), { reply_markup: profileViewKb() });
+      return new Response("OK");
+    }
     if ((cmd === "/testotp" || cmd === "/simotp") && isAdminUser(uid, env, walletConfig)) {
       const [, num, code, svc = "Facebook"] = text.split(/\s+/);
       const ok = num && code ? await deliverVerifiedOtp(db, tg, walletConfig, platforms, num, normalizeServiceName(svc), code, `Test OTP: ${code}`) : false;
@@ -1490,6 +1566,11 @@ async function handleTelegramUpdate(update, env, ctx = null) {
   if (text.includes("𝐋𝐞𝐚𝐝𝐞𝐫𝐛𝐨𝐚𝐫𝐝") || text.toUpperCase().includes("LEADERBOARD")) {
     const [t, pc] = await formatLeaderboardMessage(db, uid);
     await tg.sendMessage(chatId, t, { reply_markup: leaderboardViewKb(pc) });
+    return new Response("OK");
+  }
+  if (text.toUpperCase().includes("PROFILE STATUS") || text === "/profile" || text === "/me") {
+    if (!(await ensureMembership(uid, chatId, null, db, tg, env, walletConfig))) return new Response("OK");
+    await tg.sendMessage(chatId, await formatProfileStatusMessage(db, uid, walletConfig, platforms), { reply_markup: profileViewKb() });
     return new Response("OK");
   }
   if (text.includes("𝐒𝐮𝐩𝐩𝐨𝐫𝐭") || text.toUpperCase().includes("SUPPORT")) {
