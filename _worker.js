@@ -951,7 +951,10 @@ function adminPanelKb(uid, env, walletConfig) {
   const isSup = isSuperAdmin(uid, env), rows = [], m = [];
   if (isSup) rows.push([btn("👑 Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
   if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
-  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
+  if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) {
+    m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
+    m.push(btn("🏆 Leaderboard Manage", { callback_data: "adm_lb_settings_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.lb_trophy }));
+  }
   if (isSup || hasPermission(uid, "wallet", env, walletConfig) || hasPermission(uid, "withdraw", env, walletConfig)) {
     m.push(btn("💰 Wallet & Withdraw", { callback_data: "adm_menu_wallet", icon_custom_emoji_id: CUSTOM_EMOJIS.wallet }));
     m.push(btn("🎁 Reward Management", { callback_data: "adm_reward_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.dollar }));
@@ -1081,33 +1084,21 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
 function getCycleInfo(ts = null, st = {}) {
   const now = ts !== null ? ts : nowTs();
   const bdDate = new Date((now + 6 * 3600) * 1000); // Bangladesh Time (UTC+6)
-  const ch = Number(st.cycle_hours || 168);
-  const ctype = st.cycle_type || "weekly";
-  if (ctype === "weekly" || ch >= 168) {
-    // 7-day weekly cycle: resets every Saturday 00:00 BD Time (UTC+6)
-    const daysSinceSat = (bdDate.getUTCDay() + 1) % 7; // Sat=0, Sun=1, ..., Fri=6
-    const weekStartBdMs = Date.UTC(bdDate.getUTCFullYear(), bdDate.getUTCMonth(), bdDate.getUTCDate() - daysSinceSat);
-    const weekEndUtcSec = Math.floor((weekStartBdMs + 7 * 86400000) / 1000) - 6 * 3600;
-    const rem = Math.max(0, weekEndUtcSec - now);
-    const dayKeys = [];
-    for (let i = 0; i < 7; i++) dayKeys.push(new Date(weekStartBdMs + i * 86400000).toISOString().slice(0, 10));
-    return {
-      cycle_key: `week_${dayKeys[0]}`,
-      day_keys: dayKeys,
-      days_left: Math.floor(rem / 86400),
-      hours_left: Math.floor((rem % 86400) / 3600),
-      mins_left: Math.floor((rem % 3600) / 60),
-      label: "Weekly (Sat–Fri)",
-    };
-  }
-  const d = new Date(now * 1000);
-  if (ctype === "hourly" || ch < 24) {
-    const p = Math.max(1, ch) * 3600, b = Math.floor(now / p), rem = Math.max(0, (b + 1) * p - now);
-    return { cycle_key: `${d.toISOString().slice(0, 10)}_b${b}`, days_left: 0, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: `${ch}h Cycle` };
-  }
-  const nextM = Math.floor(Date.UTC(bdDate.getUTCFullYear(), bdDate.getUTCMonth(), bdDate.getUTCDate() + 1) / 1000) - 6 * 3600;
-  const rem = Math.max(0, nextM - now);
-  return { cycle_key: bdDate.toISOString().slice(0, 10), days_left: 0, hours_left: Math.floor(rem / 3600), mins_left: Math.floor((rem % 3600) / 60), label: "Daily (24h)" };
+  // Strictly 7-day weekly cycle: resets every Saturday 00:00 BD Time (UTC+6)
+  const daysSinceSat = (bdDate.getUTCDay() + 1) % 7; // Sat=0, Sun=1, ..., Fri=6
+  const weekStartBdMs = Date.UTC(bdDate.getUTCFullYear(), bdDate.getUTCMonth(), bdDate.getUTCDate() - daysSinceSat);
+  const weekEndUtcSec = Math.floor((weekStartBdMs + 7 * 86400000) / 1000) - 6 * 3600;
+  const rem = Math.max(0, weekEndUtcSec - now);
+  const dayKeys = [];
+  for (let i = 0; i < 7; i++) dayKeys.push(new Date(weekStartBdMs + i * 86400000).toISOString().slice(0, 10));
+  return {
+    cycle_key: `week_${dayKeys[0]}`,
+    day_keys: dayKeys,
+    days_left: Math.floor(rem / 86400),
+    hours_left: Math.floor((rem % 86400) / 3600),
+    mins_left: Math.floor((rem % 3600) / 60),
+    label: "Weekly (7 Days • Sat–Fri)",
+  };
 }
 function calculateUserLevel(lb, uid, dateStr) {
   const st = lb.settings || {}, reqs = st.requirements || {}, days = Number(reqs.streak_days || 7);
@@ -1507,13 +1498,12 @@ async function handleTelegramUpdate(update, env, ctx = null) {
           const rateSummary = hasGlobal ? `৳${Number(ex.custom_global_rate).toFixed(2)}` : Object.entries(ex.custom_rates).map(([k, v]) => `${k}:${v}`).join(", ");
           vipRows.push([
             btn(`🌟 ${r.name || r.uid} (${rateSummary})`, { callback_data: `adm_user_reward|${r.uid}`, style: "primary" }),
-            btn("❌ Remove", { callback_data: `adm_u_rate_reset|${r.uid}`, style: "danger" }),
           ]);
         }
         vipRows.push([btn("🔍 Search & Add VIP User (ID / @username)", { callback_data: "adm_search_user", style: "success" })]);
         vipRows.push([btn("🔙 Back", { callback_data: "adm_reward_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         const txt = vipRows.length > 2
-          ? `👤 <b>Specific User Rewards (${vipRows.length - 2} VIP Users)</b>\n\nTap a user to edit their rates, or tap <b>❌ Remove</b> to reset to default:`
+          ? `👤 <b>Specific User Rewards (${vipRows.length - 2} VIP Users)</b>\n\nTap a user to view, edit, or remove from VIP:`
           : "👤 <b>Specific User Rewards</b>\n\n<i>No VIP custom rewards set yet. Tap Search below to add a user!</i>";
         await tg.safeEditMessage(chatId, msgId, txt, ikb(vipRows));
       } else if (data.startsWith("adm_user_reward|")) {
@@ -1525,8 +1515,8 @@ async function handleTelegramUpdate(update, env, ctx = null) {
           return [btn(`${svc} (${tag})`, { callback_data: `adm_u_rate_svc|${tUid}|${svc}` })];
         });
         rows.push([btn(`🌍 All Services Override (${tu.custom_global_rate != null ? "৳" + Number(tu.custom_global_rate).toFixed(2) : "Not Set"})`, { callback_data: `adm_u_rate_global|${tUid}`, style: "success" })]);
-        rows.push([btn("🔄 Reset User to Default Rates", { callback_data: `adm_u_rate_reset|${tUid}`, style: "danger" })]);
-        rows.push([btn("🔙 Back", { callback_data: `adm_view_user|${tUid}`, icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        rows.push([btn("🗑️ Remove from VIP (Reset to Default)", { callback_data: `adm_u_rate_reset|${tUid}`, style: "danger" })]);
+        rows.push([btn("🔙 Back to VIP List", { callback_data: "adm_vip_users_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
         await tg.safeEditMessage(chatId, msgId, `🎁 <b>Custom Rewards for <code>${tUid}</code> (${escapeHtml(tu.name)})</b>\n\nSelect a service to set a custom BDT rate for this user:`, ikb(rows));
       } else if (data.startsWith("adm_u_rate_svc|")) {
         const [, tUid, svc] = data.split("|"), u = await db.getUser(uid);
@@ -1594,18 +1584,17 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       else if (data === "adm_menu_stats") await tg.safeEditMessage(chatId, msgId, "📊 <b>Traffic & Stats</b>", ikb([[btn("📊 Stats", { callback_data: "adm_stats" }), btn("🔍 Search User", { callback_data: "adm_search_user" })], [btn("🏆 Leaderboard Settings", { callback_data: "adm_lb_settings_menu", style: "primary" })], [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       else if (data === "adm_lb_settings_menu") {
         const lb = await db.getLeaderboard(), st = lb.settings || {};
-        const enabled = st.enabled !== false, isWeekly = (st.cycle_type || "weekly") === "weekly";
+        const enabled = st.enabled !== false;
         const rTxt = st.reward_text || DEFAULT_LEADERBOARD.settings.reward_text;
         const kb = ikb([
           [btn(enabled ? "🟢 Leaderboard: ON" : "🔴 Leaderboard: OFF", { callback_data: "adm_lb_toggle", style: enabled ? "success" : "danger" })],
-          [btn(`📅 Cycle: ${isWeekly ? "Weekly (Sat–Fri)" : "Daily (24h)"}`, { callback_data: "adm_lb_cycle_toggle", style: "primary" })],
           [btn("🎁 Set Leaderboard Reward", { callback_data: "adm_lb_set_reward", style: "success" })],
-          [btn("🔙 Back", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+          [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, `🏆 <b>Leaderboard Settings</b>\n\n• <b>Status:</b> ${enabled ? "🟢 ON" : "🔴 OFF"}\n• <b>Cycle:</b> ${isWeekly ? "Weekly (Resets every Saturday)" : "Daily (24h)"}\n• <b>Top Winners:</b> ${st.top_winners_count || 5}\n\n<b>🎁 Current Reward Display:</b>\n<code>${escapeHtml(rTxt)}</code>`, kb);
+        await tg.safeEditMessage(chatId, msgId, `🏆 <b>Leaderboard Manage</b>\n\n• <b>Status:</b> ${enabled ? "🟢 ON" : "🔴 OFF"}\n• <b>Cycle:</b> Fixed 7 Days (Resets every Saturday)\n• <b>Top Winners:</b> ${st.top_winners_count || 5}\n\n<b>🎁 Current Reward Display:</b>\n<code>${escapeHtml(rTxt)}</code>`, kb);
       } else if (data === "adm_lb_set_reward") {
         const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_lb_set_reward" }; await db.saveUser(uid, u); }
-        await tg.sendMessage(chatId, "🎁 Write the <b>Leaderboard Reward</b> text/amounts to show users at the top of Leaderboard (e.g. <code>🥇 #1: ৳500\n🥈 #2: ৳300</code>):\nSend /cancel to abort.");
+        await tg.sendMessage(chatId, `🎁 <b>Set Leaderboard Reward</b>\n\nখুব সহজে ২ভাবেই সেট করতে পারবেন:\n\n<b>১. শুধু ৫ জন বিজয়ীর টাকার পরিমাণ লিখুন (স্পেস দিয়ে):</b>\n<code>500 300 200 100 100</code>\n<i>(বট নিজেই ১ থেকে ৫ নম্বর সাজিয়ে নেবে)</i>\n\n<b>২. অথবা নিজের মতো যেকোনো লেখা পাঠান:</b>\n<code>🥇 ১ম: ৳500\n🥈 ২য়: ৳300\n🥉 ৩য়: ৳200\n🏅 ৪র্থ-৫ম: ৳100</code>\n\nবাতিল করতে /cancel লিখুন।`);
       } else if (data === "adm_lb_toggle") {
         const lb = await db.getLeaderboard(); lb.settings.enabled = lb.settings.enabled === false; await db.saveLeaderboard(lb);
         await tg.safeEditMessage(chatId, msgId, `✅ Leaderboard is now <b>${lb.settings.enabled ? "ON" : "OFF"}</b>.`, ikb([[btn("🏆 Back to Settings", { callback_data: "adm_lb_settings_menu" })]]));
@@ -2056,10 +2045,16 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     }
   } else if (pa.action === "adm_lb_set_reward" && isAdminUser(uid, env, walletConfig)) {
     const lb = await db.getLeaderboard();
-    lb.settings.reward_text = text;
+    let finalRewardText = text;
+    if (/^\d+(?:\s+\d+){1,4}$/.test(text.trim())) {
+      const nums = text.trim().split(/\s+/);
+      const icons = ["🥇 1st", "🥈 2nd", "🥉 3rd", "4️⃣ 4th", "5️⃣ 5th"];
+      finalRewardText = nums.map((amt, i) => `${icons[i]}: ৳${amt} BDT`).join("\n");
+    }
+    lb.settings.reward_text = finalRewardText;
     await db.saveLeaderboard(lb);
     u.pending_action = null; await db.saveUser(uid, u);
-    await tg.sendMessage(chatId, `✅ Updated Leaderboard Reward:\n\n<blockquote>${escapeHtml(text)}</blockquote>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
+    await tg.sendMessage(chatId, `✅ Updated Leaderboard Reward:\n\n<blockquote>${escapeHtml(finalRewardText)}</blockquote>`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
   } else if (pa.action === "adm_u_rate_svc" && isAdminUser(uid, env, walletConfig)) {
     const val = parseFloat(text);
     if (isNaN(val) || val < 0) { await tg.sendMessage(chatId, "❌ Invalid rate. Enter a valid number or /cancel."); return new Response("OK"); }
