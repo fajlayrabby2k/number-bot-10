@@ -713,6 +713,8 @@ class BotDB {
     return lb;
   }
   saveLeaderboard(lb) { return this.setKV("leaderboard", lb); }
+  async getBulkRequests() { const arr = await this.getKV("bulk_requests", []); return Array.isArray(arr) ? arr : []; }
+  saveBulkRequests(list) { return this.setKV("bulk_requests", Array.isArray(list) ? list : []); }
 
   _rowToUser(row) {
     if (!row) return null;
@@ -925,7 +927,7 @@ function servicesKbAvailable(summary, walletConfig, platforms) {
   const rows = [];
   if (buttons.length) { for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2)); }
   else rows.push([btn("No Numbers Available", { callback_data: "noop", icon_custom_emoji_id: CUSTOM_EMOJIS.trash })]);
-  rows.push([btn("🟢 Bulk Number", { callback_data: "bulk_menu", style: "success" })]);
+  if (walletConfig?.bulk_system_enabled !== false) rows.push([btn("🟢 Bulk Number", { callback_data: "bulk_menu", style: "success" })]);
   return ikb(rows);
 }
 function countriesKb(svc, cmap, walletConfig) {
@@ -952,7 +954,10 @@ function walletViewKb(walletConfig) {
 function adminPanelKb(uid, env, walletConfig) {
   const isSup = isSuperAdmin(uid, env), rows = [], m = [];
   if (isSup) rows.push([btn("👑 Manage Admins (Super Admin)", { callback_data: "adm_manage_admins_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.shield })]);
-  if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
+  if (isSup || hasPermission(uid, "numbers", env, walletConfig) || hasPermission(uid, "filter", env, walletConfig)) {
+    m.push(btn("📱 Numbers Management", { callback_data: "adm_menu_numbers", icon_custom_emoji_id: CUSTOM_EMOJIS.mobile }));
+    m.push(btn("🟢 Bulk Number Manage", { callback_data: "adm_bulk_settings_menu" }));
+  }
   if (isSup || hasPermission(uid, "stats", env, walletConfig) || isAdminUser(uid, env, walletConfig)) {
     m.push(btn("📊 Traffic & Stats", { callback_data: "adm_menu_stats", icon_custom_emoji_id: CUSTOM_EMOJIS.chart }));
     m.push(btn("🏆 Leaderboard Manage", { callback_data: "adm_lb_settings_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.lb_trophy }));
@@ -1398,14 +1403,19 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       const [, svc, cc] = data.split("|");
       await deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, cc, walletConfig, platforms, ctx);
     } else if (data === "bulk_menu") {
+      if (walletConfig.bulk_system_enabled === false) {
+        await tg.safeEditMessage(chatId, msgId, "🔴 <b>Bulk Number System</b> is currently disabled by Admin.", ikb([[btn("🔙 Back", { callback_data: "get_number", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+        return new Response("OK");
+      }
       const u = await db.getUser(uid);
       const limit = Math.floor(Number(u?.bulk_limit || 0));
       if (!u?.bulk_enabled || limit <= 0) {
         const kb = ikb([
-          [btn("💬 Request Approval (Help Desk)", { callback_data: "start_live_support", style: "success" })],
+          [btn("📩 Send Approval Request", { callback_data: "bulk_req_start", style: "success" })],
+          [btn("💬 Live Chat (Help Desk)", { callback_data: "start_live_support", style: "primary" })],
           [btn("🔙 Back", { callback_data: "get_number", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, "🔒 <b>Bulk Number Access Required</b>\n\nবাল্ক নাম্বার নিতে হলে আগে অ্যাডমিনের অ্যাপ্রুভাল নিতে হবে।\n\nআপনি একসাথে কতগুলো নাম্বার নিতে চান তা নিচের <b>Help Desk</b> বাটনে ক্লিক করে মেসেজ দিয়ে জানান — অ্যাডমিন আপনার অ্যাকাউন্টে পারমিশন ও লিমিট সেট করে দেবেন।", kb);
+        await tg.safeEditMessage(chatId, msgId, "🔒 <b>Bulk Number Access Required</b>\n\nবাল্ক নাম্বার নিতে হলে আগে অ্যাডমিনের অ্যাপ্রুভাল নিতে হবে।\n\nনিচের <b>📩 Send Approval Request</b> বাটনে ক্লিক করে আপনি কতগুলো নাম্বার নিতে চান তা পাঠান — অ্যাডমিন সাথে সাথে নোটিফিকেশন পাবেন এবং অ্যাপ্রুভ করে দেবেন।", kb);
         return new Response("OK");
       }
       const sum = await db.getAllNumbersSummary();
@@ -1425,10 +1435,14 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       const rows = [];
       if (buttons.length) { for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2)); }
       else rows.push([btn("No Numbers Available", { callback_data: "noop", icon_custom_emoji_id: CUSTOM_EMOJIS.trash })]);
-      rows.push([btn("💬 Increase Limit (Live Chat)", { callback_data: "start_live_support", style: "primary" })]);
+      rows.push([btn("📩 Request Limit Increase", { callback_data: "bulk_req_start", style: "primary" })]);
       rows.push([btn("🔙 Back", { callback_data: "get_number", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
       const hdr = `<blockquote><b>🟢 Bulk Number System</b>\n\n• <b>Your Batch Limit:</b> ${limit} numbers\n• <b>Hold Time:</b> ${NUMBER_VALIDITY_SECONDS / 60} minutes\n• <b>Delivery:</b> Instant .txt file</blockquote>\n\n🌍 <b>Select a Country below:</b>`;
       await tg.safeEditMessage(chatId, msgId, hdr, ikb(rows));
+    } else if (data === "bulk_req_start") {
+      const u = await db.getUser(uid);
+      if (u) { u.pending_action = { action: "bulk_req_submit" }; await db.saveUser(uid, u); }
+      await tg.sendMessage(chatId, "📩 <b>Bulk Number Approval Request</b>\n\nআপনি একসাথে কতগুলো নাম্বার নিতে চান এবং কোন সার্ভিস/দেশ লাগবে তা লিখে পাঠান (যেমন: <code>30 Facebook</code> অথবা <code>50</code>):\n\nবাতিল করতে /cancel লিখুন।");
     } else if (data.startsWith("bulk_cty|")) {
       const [, svc, ccode] = data.split("|");
       const u = await db.getUser(uid);
@@ -1559,6 +1573,92 @@ async function handleTelegramUpdate(update, env, ctx = null) {
           [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
         await tg.safeEditMessage(chatId, msgId, "👥 <b>User Management</b>\n\nSearch or browse users to manage balance, bulk access, or ban/unban:", kb);
+      } else if (data === "adm_bulk_settings_menu") {
+        const [reqs, approvedRes] = await Promise.all([
+          db.getBulkRequests(),
+          db.d1.prepare("SELECT COUNT(*) as cnt FROM users WHERE extra LIKE '%\"bulk_enabled\":true%'").first(),
+        ]);
+        const pendingCnt = reqs.filter((r) => r.status === "pending").length;
+        const approvedCnt = Number(approvedRes?.cnt || 0);
+        const sysOn = walletConfig.bulk_system_enabled !== false;
+        const defLimit = Number(walletConfig.bulk_default_limit || 30);
+        const kb = ikb([
+          [btn(sysOn ? "🟢 Bulk System: ON" : "🔴 Bulk System: OFF", { callback_data: "adm_bulk_sys_toggle", style: sysOn ? "success" : "danger" })],
+          [btn(`📩 Pending Requests (${pendingCnt})`, { callback_data: "adm_bulk_requests", style: pendingCnt > 0 ? "success" : "primary" })],
+          [btn(`👥 Bulk Approved Users (${approvedCnt})`, { callback_data: "adm_bulk_users_menu", style: "primary" })],
+          [btn(`⚙️ Default Limit: ${defLimit}`, { callback_data: "adm_bulk_default_limit", style: "primary" }), btn("🔍 Search User", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `🟢 <b>Bulk Number Manage</b>\n\n• <b>System Status:</b> ${sysOn ? "🟢 ON" : "🔴 OFF"}\n• <b>Pending Requests:</b> ${pendingCnt}\n• <b>Approved Users:</b> ${approvedCnt}\n• <b>Default Quick Limit:</b> ${defLimit} numbers`, kb);
+      } else if (data === "adm_bulk_sys_toggle") {
+        walletConfig.bulk_system_enabled = walletConfig.bulk_system_enabled === false;
+        await db.saveWalletConfig(walletConfig);
+        await tg.safeEditMessage(chatId, msgId, `✅ Bulk Number System is now <b>${walletConfig.bulk_system_enabled ? "ON" : "OFF"}</b>.`, ikb([[btn("🟢 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]));
+      } else if (data === "adm_bulk_default_limit") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_bulk_default_limit" }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, "⚙️ Enter default Bulk Number batch limit (e.g. <code>30</code>):\n\nSend /cancel to abort.");
+      } else if (data === "adm_bulk_requests") {
+        const reqs = await db.getBulkRequests();
+        const pending = reqs.filter((r) => r.status === "pending");
+        if (!pending.length) {
+          await tg.safeEditMessage(chatId, msgId, "📩 <b>Pending Bulk Requests</b>\n\n<i>No pending requests right now.</i>", ikb([[btn("🔙 Back", { callback_data: "adm_bulk_settings_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+        } else {
+          await tg.safeEditMessage(chatId, msgId, `📩 <b>Pending Bulk Requests (${pending.length})</b>\n\nShowing pending requests below:`, ikb([[btn("🗑️ Clear All Requests", { callback_data: "adm_bulk_req_clear", style: "danger" })], [btn("🔙 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+          for (const r of pending.slice(0, 10)) {
+            const qBtn = r.req_qty > 0
+              ? btn(`⚡ Quick Approve (${r.req_qty})`, { callback_data: `adm_bulk_req_quick|${r.id}|${r.req_qty}`, style: "success" })
+              : btn(`⚡ Quick Approve (${walletConfig.bulk_default_limit || 30})`, { callback_data: `adm_bulk_req_quick|${r.id}|${walletConfig.bulk_default_limit || 30}`, style: "success" });
+            const kb = ikb([
+              [qBtn, btn("✏️ Custom Limit", { callback_data: `adm_bulk_req_approve|${r.id}`, style: "primary" })],
+              [btn("💬 Chat User", { callback_data: `adm_bulk_chat|${r.user_id}`, style: "primary" }), btn("👤 View User", { callback_data: `adm_view_user|${r.user_id}` })],
+              [btn("❌ Reject", { callback_data: `adm_bulk_req_reject|${r.id}`, style: "danger" }), btn("🗑️ Delete", { callback_data: `adm_bulk_req_del|${r.id}`, style: "danger" })],
+            ]);
+            await tg.sendMessage(chatId, `📩 <b>Bulk Request</b> <code>${r.id}</code>\n👤 <b>User:</b> ${escapeHtml(r.name || r.user_id)} (<code>${r.user_id}</code>)${r.username ? ` @${escapeHtml(r.username)}` : ""}\n📝 <b>Message:</b> ${escapeHtml(r.note || "N/A")}`, { reply_markup: kb });
+          }
+        }
+      } else if (data.startsWith("adm_bulk_req_del|")) {
+        const reqId = data.split("|")[1];
+        const reqs = (await db.getBulkRequests()).filter((x) => x.id !== reqId);
+        await db.saveBulkRequests(reqs);
+        await tg.safeEditMessage(chatId, msgId, `🗑️ Deleted Bulk Request <code>${reqId}</code>.`, ikb([[btn("📩 Pending Requests", { callback_data: "adm_bulk_requests" }), btn("🟢 Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]));
+      } else if (data === "adm_bulk_req_clear") {
+        const reqs = (await db.getBulkRequests()).filter((x) => x.status !== "pending");
+        await db.saveBulkRequests(reqs);
+        await tg.safeEditMessage(chatId, msgId, "🗑️ All pending Bulk Requests cleared.", ikb([[btn("🔙 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      } else if (data.startsWith("adm_bulk_chat|")) {
+        const tUid = data.split("|")[1];
+        const u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "adm_bulk_chat_msg", target_uid: tUid }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `💬 Send your message to user <code>${tUid}</code> (or /cancel):`);
+      } else if (data.startsWith("adm_bulk_req_quick|")) {
+        const [, reqId, qtyStr] = data.split("|");
+        const qty = Math.max(1, parseInt(qtyStr, 10) || 30);
+        const reqs = await db.getBulkRequests();
+        const req = reqs.find((x) => x.id === reqId);
+        if (!req || req.status !== "pending") { await tg.safeEditMessage(chatId, msgId, "⚠️ Request already processed."); return new Response("OK"); }
+        const tu = await db.getUser(req.user_id);
+        if (tu) { tu.bulk_enabled = true; tu.bulk_limit = qty; await db.saveUser(tu.uid, tu); }
+        req.status = "approved"; req.approved_limit = qty;
+        await db.saveBulkRequests(reqs);
+        await tg.sendMessage(req.user_id, `🎉 <b>Bulk Number Request Approved!</b>\n\nঅ্যাডমিন আপনার রিকোয়েস্ট অ্যাপ্রুভ করেছেন।\n📦 <b>Max Batch Limit:</b> ${qty} numbers\n\nএখন <b>Get Number → 🟢 Bulk Number</b> থেকে নাম্বার নিতে পারবেন!`).catch(() => {});
+        await tg.safeEditMessage(chatId, msgId, `✅ Approved Bulk Request for <code>${req.user_id}</code> with limit <b>${qty}</b> numbers!`);
+      } else if (data.startsWith("adm_bulk_req_approve|")) {
+        const reqId = data.split("|")[1];
+        const reqs = await db.getBulkRequests();
+        const req = reqs.find((x) => x.id === reqId);
+        if (!req || req.status !== "pending") { await tg.safeEditMessage(chatId, msgId, "⚠️ Request already processed."); return new Response("OK"); }
+        const u = await db.getUser(uid);
+        if (u) { u.pending_action = { action: "adm_set_bulk_limit", target_uid: req.user_id, req_id: req.id }; await db.saveUser(uid, u); }
+        await tg.sendMessage(chatId, `✏️ Enter max Bulk Number limit per batch for user <code>${req.user_id}</code> (${escapeHtml(req.name || "")}):\n\nSend /cancel to abort.`);
+      } else if (data.startsWith("adm_bulk_req_reject|")) {
+        const reqId = data.split("|")[1];
+        const reqs = await db.getBulkRequests();
+        const req = reqs.find((x) => x.id === reqId);
+        if (!req || req.status !== "pending") { await tg.safeEditMessage(chatId, msgId, "⚠️ Request already processed."); return new Response("OK"); }
+        req.status = "rejected";
+        await db.saveBulkRequests(reqs);
+        await tg.sendMessage(req.user_id, "❌ আপনার Bulk Number রিকোয়েস্টটি বাতিল করা হয়েছে। বিস্তারিত জানতে হেল্প ডেস্কে যোগাযোগ করুন।").catch(() => {});
+        await tg.safeEditMessage(chatId, msgId, `❌ Rejected Bulk Request <code>${req.id}</code> (User <code>${req.user_id}</code>).`);
       } else if (data === "adm_bulk_users_menu") {
         const { results } = await db.d1.prepare("SELECT uid, name, username, extra FROM users WHERE extra LIKE '%\"bulk_enabled\":true%'").all();
         const rows = [];
@@ -2231,6 +2331,61 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     u.pending_action = null;
     await db.saveUser(uid, u);
     await deliverBulkNumbersToUser(db, tg, chatId, uid, pa.service, pa.country, qty, walletConfig, platforms, ctx);
+  } else if (pa.action === "bulk_req_submit") {
+    const note = text.trim();
+    const numMatch = note.match(/\d+/);
+    const parsedQty = numMatch ? Math.min(5000, Math.max(0, parseInt(numMatch[0], 10))) : 0;
+    const reqObj = {
+      id: `BR${nowTs()}${Math.floor(Math.random() * 900 + 100)}`,
+      user_id: String(uid),
+      name: u.name || "",
+      username: u.username || "",
+      note,
+      req_qty: parsedQty,
+      status: "pending",
+      ts: nowTs(),
+    };
+    const reqs = await db.getBulkRequests();
+    const filtered = reqs.filter((x) => !(String(x.user_id) === String(uid) && x.status === "pending"));
+    filtered.unshift(reqObj);
+    await db.saveBulkRequests(filtered.slice(0, 100));
+    u.pending_action = null;
+    await db.saveUser(uid, u);
+    const defLim = Number(walletConfig.bulk_default_limit || 30);
+    const qBtn = parsedQty > 0
+      ? btn(`⚡ Quick Approve (${parsedQty})`, { callback_data: `adm_bulk_req_quick|${reqObj.id}|${parsedQty}`, style: "success" })
+      : btn(`⚡ Quick Approve (${defLim})`, { callback_data: `adm_bulk_req_quick|${reqObj.id}|${defLim}`, style: "success" });
+    const admKb = ikb([
+      [qBtn, btn("✏️ Custom Limit", { callback_data: `adm_bulk_req_approve|${reqObj.id}`, style: "primary" })],
+      [btn("💬 Chat User", { callback_data: `adm_bulk_chat|${uid}`, style: "primary" }), btn("👤 View User", { callback_data: `adm_view_user|${uid}` })],
+      [btn("❌ Reject", { callback_data: `adm_bulk_req_reject|${reqObj.id}`, style: "danger" }), btn("🗑️ Delete", { callback_data: `adm_bulk_req_del|${reqObj.id}`, style: "danger" })],
+    ]);
+    await tg.sendMessage(adminId, `🔔 <b>New Bulk Number Request!</b>\n\n🆔 <b>Request ID:</b> <code>${reqObj.id}</code>\n👤 <b>User:</b> ${escapeHtml(u.name || uid)} (<code>${uid}</code>)${u.username ? ` @${escapeHtml(u.username)}` : ""}\n📝 <b>Message:</b> ${escapeHtml(note)}`, { reply_markup: admKb }).catch(() => {});
+    await tg.sendMessage(chatId, "✅ আপনার <b>Bulk Number</b> রিকোয়েস্ট অ্যাডমিনের কাছে পাঠানো হয়েছে!\n\nঅ্যাডমিন অ্যাপ্রুভ করলে আপনি সাথে সাথে নোটিফিকেশন পাবেন।");
+  } else if (pa.action === "adm_bulk_chat_msg" && isAdminUser(uid, env, walletConfig)) {
+    const tUid = pa.target_uid;
+    u.pending_action = null;
+    await db.saveUser(uid, u);
+    const sent = await tg.sendMessage(tUid, `💬 <b>Admin Message:</b>\n\n${escapeHtml(text)}`, {
+      reply_markup: ikb([[btn("💬 Reply to Admin", { callback_data: "start_live_support", style: "success" })]]),
+    });
+    if (sent.ok) {
+      await tg.sendMessage(chatId, `✅ Message sent to <code>${tUid}</code>!`, {
+        reply_markup: ikb([[btn("💬 Send Another", { callback_data: `adm_bulk_chat|${tUid}`, style: "primary" }), btn("📩 Pending Requests", { callback_data: "adm_bulk_requests" })]]),
+      });
+    } else {
+      await tg.sendMessage(chatId, `❌ Failed to send message to <code>${tUid}</code>.`);
+    }
+  } else if (pa.action === "adm_bulk_default_limit" && isAdminUser(uid, env, walletConfig)) {
+    const val = parseInt(text.trim(), 10);
+    if (isNaN(val) || val < 1 || val > 5000) {
+      await tg.sendMessage(chatId, "❌ Invalid limit. Enter a positive number (e.g. <code>30</code>) or /cancel.");
+      return new Response("OK");
+    }
+    walletConfig.bulk_default_limit = val;
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ Default Bulk Number limit saved to <b>${val}</b>!`, { reply_markup: ikb([[btn("🟢 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]) });
   } else if (pa.action === "adm_set_bulk_limit" && isAdminUser(uid, env, walletConfig)) {
     const val = parseInt(text.trim(), 10);
     if (isNaN(val) || val < 1 || val > 5000) {
@@ -2244,9 +2399,14 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     tu.bulk_enabled = true;
     tu.bulk_limit = val;
     await db.saveUser(tu.uid, tu);
+    if (pa.req_id) {
+      const reqs = await db.getBulkRequests();
+      const req = reqs.find((x) => x.id === pa.req_id);
+      if (req) { req.status = "approved"; req.approved_limit = val; await db.saveBulkRequests(reqs); }
+    }
     await tg.sendMessage(tu.uid, `🎉 <b>Bulk Number Access Approved!</b>\n\nঅ্যাডমিন আপনার অ্যাকাউন্টে <b>Bulk Number</b> পারমিশন চালু করে দিয়েছেন।\n📦 <b>Max Batch Limit:</b> ${val} numbers\n\nএখন <b>Get Number → 🟢 Bulk Number</b> থেকে নাম্বার নিতে পারবেন!`).catch(() => {});
     await tg.sendMessage(chatId, `✅ Bulk Number enabled for <code>${tu.uid}</code> (${escapeHtml(tu.name)}) with limit <b>${val}</b> numbers!`, {
-      reply_markup: ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tu.uid}` }), btn("🟢 Bulk Users", { callback_data: "adm_bulk_users_menu" })]]),
+      reply_markup: ikb([[btn("👤 View User", { callback_data: `adm_view_user|${tu.uid}` }), btn("🟢 Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]),
     });
   } else if (pa.action === "adm_search_user" && isAdminUser(uid, env, walletConfig)) {
     const found = await db.findUsers(text); u.pending_action = null; await db.saveUser(uid, u);
