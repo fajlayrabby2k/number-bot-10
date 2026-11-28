@@ -654,7 +654,7 @@ class BotDB {
   async preloadCore(uid = null) {
     const now = Date.now();
     const mem = globalThis._kvMemCache;
-    const memValid = mem && (now - mem.ts < 15000);
+    const memValid = mem && (now - mem.ts < 30000);
     if (memValid) {
       for (const [k, v] of Object.entries(mem.data)) this._cache.set(k, v);
       if (uid) {
@@ -754,13 +754,18 @@ class BotDB {
     return (results || []).map((r) => this._rowToUser(r));
   }
 
+  _invalidateNumCache() { globalThis._numSummaryCache = null; }
   async getCountryCounts(svc) {
-    const { results } = await this.d1.prepare("SELECT country_key, COUNT(*) as cnt FROM numbers WHERE service = ? GROUP BY country_key").bind(svc).all();
-    const out = {}; for (const r of results || []) out[r.country_key] = r.cnt; return out;
+    const sum = await this.getAllNumbersSummary();
+    return sum[svc] || {};
   }
   async getAllNumbersSummary() {
+    const now = Date.now(), c = globalThis._numSummaryCache;
+    if (c && now - c.ts < 5000) return c.data;
     const { results } = await this.d1.prepare("SELECT service, country_key, COUNT(*) as cnt FROM numbers GROUP BY service, country_key").all();
-    const out = {}; for (const r of results || []) { if (!out[r.service]) out[r.service] = {}; out[r.service][r.country_key] = r.cnt; } return out;
+    const out = {}; for (const r of results || []) { if (!out[r.service]) out[r.service] = {}; out[r.service][r.country_key] = r.cnt; }
+    globalThis._numSummaryCache = { ts: now, data: out };
+    return out;
   }
   async getNumbersList(svc, cKey, limit = 1) {
     const { results } = await this.d1.prepare("SELECT number FROM numbers WHERE service = ? AND country_key = ? ORDER BY id ASC LIMIT ?").bind(svc, cKey, limit).all();
@@ -770,22 +775,31 @@ class BotDB {
     const { results } = await this.d1.prepare("SELECT id, number FROM numbers WHERE service = ? AND country_key = ? ORDER BY id ASC LIMIT ?").bind(svc, cKey, count).all();
     if (!results || !results.length) return [];
     const ids = results.map((r) => r.id);
-    await this.d1.prepare(`DELETE FROM numbers WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run();
+    const delStmts = [];
+    for (let i = 0; i < ids.length; i += 80) {
+      const ch = ids.slice(i, i + 80);
+      delStmts.push(this.d1.prepare(`DELETE FROM numbers WHERE id IN (${ch.map(() => "?").join(",")})`).bind(...ch));
+    }
+    if (delStmts.length === 1) await delStmts[0].run();
+    else await this.d1.batch(delStmts);
+    this._invalidateNumCache();
     return results.map((r) => r.number);
   }
   async addNumbers(svc, cKey, list) {
     if (!list?.length) return 0;
     const stmt = this.d1.prepare("INSERT INTO numbers (service, country_key, number) VALUES (?, ?, ?)");
     for (let i = 0; i < list.length; i += 80) await this.d1.batch(list.slice(i, i + 80).map((n) => stmt.bind(svc, cKey, n)));
+    this._invalidateNumCache();
     return list.length;
   }
-  async removeNumbersByCountry(svc, cKey) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ? AND country_key = ?").bind(svc, cKey).run(); return r.meta?.changes || 0; }
-  async removeNumbersByService(svc) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ?").bind(svc).run(); return r.meta?.changes || 0; }
+  async removeNumbersByCountry(svc, cKey) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ? AND country_key = ?").bind(svc, cKey).run(); this._invalidateNumCache(); return r.meta?.changes || 0; }
+  async removeNumbersByService(svc) { const r = await this.d1.prepare("DELETE FROM numbers WHERE service = ?").bind(svc).run(); this._invalidateNumCache(); return r.meta?.changes || 0; }
   async removeNumbersByCleanList(cleanSet) {
     if (!cleanSet?.size) return 0;
     const { results } = await this.d1.prepare("SELECT id, number FROM numbers").all();
     const del = (results || []).filter((r) => cleanSet.has(String(r.number).replace(/[^\d]/g, ""))).map((r) => r.id);
     for (let i = 0; i < del.length; i += 80) { const c = del.slice(i, i + 80); await this.d1.prepare(`DELETE FROM numbers WHERE id IN (${c.map(() => "?").join(",")})`).bind(...c).run(); }
+    if (del.length) this._invalidateNumCache();
     return del.length;
   }
 
@@ -1083,7 +1097,7 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
   if (rem.length) rowB.push(btn("🔄 Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
   rowB.push(btn("🌍 Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
   rows.push(rowB);
-  if (walletConfig?.otp_inbox_api?.enabled && (walletConfig.otp_inbox_api.apis || []).some((a) => a.enabled)) {
+  if (walletConfig?.show_check_otp_btn !== false && walletConfig?.otp_inbox_api?.enabled && (walletConfig.otp_inbox_api.apis || []).some((a) => a.enabled)) {
     rows.push([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
   }
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
@@ -1133,7 +1147,11 @@ async function deliverBulkNumbersToUser(db, tg, chatId, uid, svc, ccode, qty, wa
   const bytes = new TextEncoder().encode(fullNums.join("\n"));
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
   const caption = `<blockquote><b>🟢 Bulk Numbers Delivered</b>\n\n${getPlatformEmojiHtml(svc, platforms)} <b>Service:</b> ${escapeHtml(svc)}\n${getCountryFlagEmoji(dial)} <b>Country:</b> ${escapeHtml(getCountryDisplayName(ccode))}\n📦 <b>Quantity:</b> ${fullNums.length} numbers\n⏳ <b>Hold Time:</b> ${NUMBER_VALIDITY_SECONDS / 60} minutes</blockquote>`;
-  await tg.sendDocument(chatId, bytes, `${svc}_${ccode}_bulk_${fullNums.length}.txt`, caption, ikb([[btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]]));
+  const bulkBtns = [[btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]];
+  if (walletConfig?.show_check_otp_btn !== false && walletConfig?.otp_inbox_api?.enabled && (walletConfig.otp_inbox_api.apis || []).some((a) => a.enabled)) {
+    bulkBtns.unshift([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
+  }
+  await tg.sendDocument(chatId, bytes, `${svc}_${ccode}_bulk_${fullNums.length}.txt`, caption, ikb(bulkBtns));
 }
 
 function getCycleInfo(ts = null, st = {}) {
@@ -1305,23 +1323,27 @@ async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, servi
     if (!userData.otps || Array.isArray(userData.otps)) userData.otps = {};
     const ex = userData.otps[displayNum];
     dup = codeStr === "N/A" ? Boolean(ex && ex.code === "N/A" && ex.sms === smsBody) : Boolean(ex && ex.code === codeStr);
+    if (dup && ex?.sms === smsBody) return false;
     if (!dup) {
       userData.otps[displayNum] = { code: codeStr, sms: smsBody, time: now };
       const rate = getRewardRate(walletConfig, svcName, countryCode, userData);
       userData.balance = Number(((userData.balance || 0) + rate).toFixed(2));
-      await db.saveUser(buyerId, userData);
       const lb = await db.getLeaderboard(), ck = new Date((now + 6 * 3600) * 1000).toISOString().slice(0, 10);
       if (!lb.daily_stats[ck]) lb.daily_stats[ck] = {};
       lb.daily_stats[ck][String(buyerId)] = (lb.daily_stats[ck][String(buyerId)] || 0) + 1;
-      await db.saveLeaderboard(lb);
+      const bgOps = [db.saveUser(buyerId, userData), db.saveLeaderboard(lb)];
       if (userData.referred_by && String(userData.referred_by) !== String(buyerId)) {
         const comm = Number((rate * (Number(walletConfig.referral_percent ?? 10) / 100)).toFixed(4));
         const refU = await db.getUser(userData.referred_by);
-        if (refU && comm > 0) { refU.balance = Number(((refU.balance || 0) + comm).toFixed(2)); refU.referral_earnings = Number(((refU.referral_earnings || 0) + comm).toFixed(2)); await db.saveUser(userData.referred_by, refU); }
+        if (refU && comm > 0) {
+          refU.balance = Number(((refU.balance || 0) + comm).toFixed(2));
+          refU.referral_earnings = Number(((refU.referral_earnings || 0) + comm).toFixed(2));
+          bgOps.push(db.saveUser(userData.referred_by, refU));
+        }
       }
+      await Promise.all(bgOps);
     }
   }
-  await db.addOtpEvent({ ts: now, country: countryCode, service: svcName, user_id: buyerId, inbox: 1, number: displayNum, code: codeStr, sms: smsBody, duplicate: dup });
   const rate = getRewardRate(walletConfig, svcName, countryCode, userData), [dial] = splitCountryProvider(countryCode);
   const otpMsg = dup
     ? `${getCountryFlagEmoji(dial)} <b>${getCountryDisplayName(countryCode)} - ${escapeHtml(svcName)}</b>\n📱 <code>${displayNum}</code>\n<i>⚠️ Duplicate OTP</i>`
@@ -1329,7 +1351,10 @@ async function deliverVerifiedOtp(db, tg, walletConfig, platforms, number, servi
   const btns = [];
   if (codeStr !== "N/A") btns.push(btn(codeStr, { copy_text: codeStr, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_copy }));
   if (smsBody) btns.push(btn("Full SMS", { copy_text: smsBody.slice(0, 256), icon_custom_emoji_id: CUSTOM_EMOJIS.clipboard }));
-  await tg.sendMessage(buyerId, otpMsg, { reply_markup: btns.length ? ikb([btns]) : null }).catch(() => {});
+  await Promise.all([
+    db.addOtpEvent({ ts: now, country: countryCode, service: svcName, user_id: buyerId, inbox: 1, number: displayNum, code: codeStr, sms: smsBody, duplicate: dup }),
+    tg.sendMessage(buyerId, otpMsg, { reply_markup: btns.length ? ikb([btns]) : null }).catch(() => {}),
+  ]);
   return true;
 }
 
@@ -1342,7 +1367,7 @@ async function pollOtpInboxApis(db, tg, walletConfig, platforms, force = false) 
     try {
       let url = api.url; const headers = { Accept: "application/json" };
       if (api.scheme === "bearer" && api.token) headers.Authorization = `Bearer ${api.token}`;
-      else if (api.token && !url.includes("token=")) url += (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(api.token)}&records=25`;
+      else if (api.token && !url.includes("token=")) url += (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(api.token)}&records=50`;
       const res = await fetch(url, { headers });
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -1922,12 +1947,19 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       }
       else if (data === "adm_menu_otp") {
         const apis = walletConfig.otp_inbox_api?.apis || [];
+        const showCheckBtn = walletConfig.show_check_otp_btn !== false;
         const kb = ikb([
           [btn("➕ Add API (URL & Key)", { callback_data: "adm_otp_api_add", style: "success" }), btn(`📋 Manage APIs (${apis.length})`, { callback_data: "adm_otp_api_list", style: "primary" })],
+          [btn(showCheckBtn ? "📩 Check OTP Btn: ON" : "📩 Check OTP Btn: OFF", { callback_data: "adm_toggle_check_otp_btn", style: showCheckBtn ? "success" : "danger" })],
           [btn("🔄 Poll APIs Now", { callback_data: "adm_otp_api_poll", style: "primary" }), btn("👥 OTP Group Settings", { callback_data: "adm_otp_group_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })],
           [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, `📥 <b>OTP System & Inbox</b>\n\n⚡ <b>Direct Webhook URL (&lt;1s Push):</b>\n<code>https://number-bot-10.pages.dev/api/otp</code>\n<i>(Supports GET &amp; POST: number, sms, service, code, secret)</i>\n\n🔌 <b>Configured REST APIs:</b> ${apis.length}`, kb);
+        await tg.safeEditMessage(chatId, msgId, `📥 <b>OTP System & Inbox</b>\n\n⚡ <b>Direct Webhook URL (&lt;1s Push):</b>\n<code>https://number-bot-10.pages.dev/api/otp</code>\n<i>(Supports GET &amp; POST: number, sms, service, code, secret)</i>\n\n🔌 <b>Configured REST APIs:</b> ${apis.length}\n📩 <b>User Check OTP Button:</b> ${showCheckBtn ? "🟢 Visible" : "🔴 Hidden"}`, kb);
+      } else if (data === "adm_toggle_check_otp_btn") {
+        walletConfig.show_check_otp_btn = walletConfig.show_check_otp_btn === false;
+        await db.saveWalletConfig(walletConfig);
+        const onNow = walletConfig.show_check_otp_btn !== false;
+        await tg.safeEditMessage(chatId, msgId, `✅ User <b>📩 Check OTP</b> button is now <b>${onNow ? "🟢 ON (Visible)" : "🔴 OFF (Hidden)"}</b>.\n\n<i>OTP delivery via Python bot / API remains active!</i>`, ikb([[btn("🔙 Back to OTP System", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       } else if (data === "adm_otp_api_list") {
         const apis = walletConfig.otp_inbox_api?.apis || [];
         const rows = apis.map((a) => [
@@ -2619,13 +2651,26 @@ export default {
             body = await request.json().catch(() => ({}));
           }
         }
+        const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
+        await db.preloadCore();
+        const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
+        if (Array.isArray(body.items) && body.items.length) {
+          let deliveredCount = 0;
+          await Promise.all(body.items.map(async (item) => {
+            const iNum = String(item.number || item.phone || item.num || item.did || "").trim();
+            const iSms = String(item.sms || item.message || item.text || item.msg || item.body || "");
+            const iSvc = normalizeServiceName(item.service || item.cli || item.app || item.sender || "Unknown");
+            const iCode = String(item.code || item.otp || extractOtpCode(iSms, [iNum]) || "N/A");
+            if (iNum && iSms && (await deliverVerifiedOtp(db, tg, walletConfig, platforms, iNum, iSvc, iCode, iSms))) {
+              deliveredCount++;
+            }
+          }));
+          return new Response(JSON.stringify({ ok: true, delivered: deliveredCount, total: body.items.length }), { headers: { "Content-Type": "application/json" } });
+        }
         const rawNum = String(body.number || body.phone || body.num || body.did || url.searchParams.get("number") || url.searchParams.get("phone") || url.searchParams.get("num") || "").trim();
         const rawSms = String(body.sms || body.message || body.text || body.msg || body.body || url.searchParams.get("sms") || url.searchParams.get("message") || url.searchParams.get("text") || "");
         const rawSvc = normalizeServiceName(body.service || body.cli || body.app || body.sender || url.searchParams.get("service") || url.searchParams.get("cli") || "Unknown");
         const rawCode = String(body.code || body.otp || url.searchParams.get("code") || url.searchParams.get("otp") || extractOtpCode(rawSms, [rawNum]) || "N/A");
-        const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
-        await db.preloadCore();
-        const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
         const delivered = await deliverVerifiedOtp(db, tg, walletConfig, platforms, rawNum, rawSvc, rawCode, rawSms);
         return new Response(JSON.stringify({ ok: true, delivered }), { headers: { "Content-Type": "application/json" } });
       } catch (e) {
