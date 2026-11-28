@@ -1083,6 +1083,9 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
   if (rem.length) rowB.push(btn("🔄 Change", { callback_data: `refresh|${svc}|${ccode}`, icon_custom_emoji_id: "6282702779341346176" }));
   rowB.push(btn("🌍 Country", { callback_data: `country_list|${svc}`, icon_custom_emoji_id: CUSTOM_EMOJIS.globe }));
   rows.push(rowB);
+  if (walletConfig?.otp_inbox_api?.enabled && (walletConfig.otp_inbox_api.apis || []).some((a) => a.enabled)) {
+    rows.push([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
+  }
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
   rows.push([btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
   if (msgId) await tg.safeEditMessage(chatId, msgId, msgHtml, ikb(rows)); else await tg.sendMessage(chatId, msgHtml, { reply_markup: ikb(rows) });
@@ -1338,18 +1341,20 @@ async function pollOtpInboxApis(db, tg, walletConfig, platforms, force = false) 
     if (!api.enabled || !api.url) continue;
     try {
       let url = api.url; const headers = { Accept: "application/json" };
-      if (api.scheme === "bearer") headers.Authorization = `Bearer ${api.token}`;
-      else url += (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(api.token || "")}&records=25`;
+      if (api.scheme === "bearer" && api.token) headers.Authorization = `Bearer ${api.token}`;
+      else if (api.token && !url.includes("token=")) url += (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(api.token)}&records=25`;
       const res = await fetch(url, { headers });
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
-      const rows = Array.isArray(data) ? data : data?.data || data?.records || data?.messages || data?.aaData || [];
+      if (data?.status === "error") continue;
+      const rows = Array.isArray(data) ? data : data?.data || data?.records || data?.messages || data?.aaData || data?.rows || data?.result || [];
       for (const r of rows) {
-        const num = Array.isArray(r) ? String(r[2] || r[1] || "") : String(r.num || r.number || r.phone || "");
-        const svc = Array.isArray(r) ? String(r[3] || "Unknown") : String(r.cli || r.service || r.app || "Unknown");
-        const sms = Array.isArray(r) ? String(r[4] || "") : String(r.message || r.sms || r.text || "");
+        const num = Array.isArray(r) ? String(r[2] || r[1] || "") : String(r.num || r.number || r.phone || r.did || "");
+        const svc = Array.isArray(r) ? String(r[3] || "Unknown") : String(r.cli || r.service || r.app || r.sender || "Unknown");
+        const sms = Array.isArray(r) ? String(r[4] || "") : String(r.message || r.sms || r.text || r.msg || r.body || "");
+        const dt = Array.isArray(r) ? String(r[0] || "") : String(r.dt || r.time || r.date || "");
         if (!num || !sms) continue;
-        const key = `${api.id}|${num}|${sms.slice(0, 60)}`;
+        const key = `${api.id}|${num}|${dt}|${sms.slice(0, 60)}`;
         if (await db.isApiMsgSeen(key)) continue;
         await db.markApiMsgSeen(key);
         const clean = num.replace(/[^\d]/g, "");
@@ -1442,7 +1447,8 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     } else if (data === "bulk_req_start") {
       const u = await db.getUser(uid);
       if (u) { u.pending_action = { action: "bulk_req_submit" }; await db.saveUser(uid, u); }
-      await tg.sendMessage(chatId, "📩 <b>Bulk Number Approval Request</b>\n\nআপনি একসাথে কতগুলো নাম্বার নিতে চান এবং কোন সার্ভিস/দেশ লাগবে তা লিখে পাঠান (যেমন: <code>30 Facebook</code> অথবা <code>50</code>):\n\nবাতিল করতে /cancel লিখুন।");
+      const defaultPrompt = "📩 <b>Bulk Number Approval Request</b>\n\nআপনি একসাথে কতগুলো নাম্বার নিতে চান এবং কোন সার্ভিস/দেশ লাগবে তা লিখে পাঠান (যেমন: <code>30 Facebook</code> অথবা <code>50</code>):\n\nবাতিল করতে /cancel লিখুন।";
+      await tg.sendMessage(chatId, walletConfig.bulk_request_prompt || defaultPrompt);
     } else if (data.startsWith("bulk_cty|")) {
       const [, svc, ccode] = data.split("|");
       const u = await db.getUser(uid);
@@ -1487,6 +1493,9 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       await tg.sendMessage(chatId, `📱 ✏️ Enter how many numbers you want (<b>1 - ${limit}</b>):\n\nSend /cancel to abort.`);
     } else if (data === "refresh_traffic") {
       await tg.safeEditMessage(chatId, msgId, await getTrafficStats(db, walletConfig), ikb([[btn("🔄 Refresh Traffic", { callback_data: "refresh_traffic" })], [btn("📱 Get Number", { callback_data: "get_number", style: "success" })]]));
+    } else if (data === "user_check_otp") {
+      const cnt = await pollOtpInboxApis(db, tg, walletConfig, platforms, true);
+      await tg.sendMessage(chatId, cnt > 0 ? `✅ Delivered <b>${cnt}</b> new OTP(s) to inbox!` : "⏳ No new OTP received yet. Please try again in a few seconds.");
     } else if (data === "refresh_wallet" || data === "wallet_back") {
       await tg.safeEditMessage(chatId, msgId, await formatWalletMessage(db, uid, walletConfig), walletViewKb(walletConfig));
     } else if (data === "refresh_profile") {
@@ -1587,9 +1596,14 @@ async function handleTelegramUpdate(update, env, ctx = null) {
           [btn(`📩 Pending Requests (${pendingCnt})`, { callback_data: "adm_bulk_requests", style: pendingCnt > 0 ? "success" : "primary" })],
           [btn(`👥 Bulk Approved Users (${approvedCnt})`, { callback_data: "adm_bulk_users_menu", style: "primary" })],
           [btn(`⚙️ Default Limit: ${defLimit}`, { callback_data: "adm_bulk_default_limit", style: "primary" }), btn("🔍 Search User", { callback_data: "adm_search_user", style: "primary" })],
+          [btn("✏️ Edit Request Prompt Text", { callback_data: "adm_bulk_req_text", style: "primary" })],
           [btn("🔙 Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
         await tg.safeEditMessage(chatId, msgId, `🟢 <b>Bulk Number Manage</b>\n\n• <b>System Status:</b> ${sysOn ? "🟢 ON" : "🔴 OFF"}\n• <b>Pending Requests:</b> ${pendingCnt}\n• <b>Approved Users:</b> ${approvedCnt}\n• <b>Default Quick Limit:</b> ${defLimit} numbers`, kb);
+      } else if (data === "adm_bulk_req_text") {
+        const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_bulk_req_text" }; await db.saveUser(uid, u); }
+        const curTxt = walletConfig.bulk_request_prompt || "📩 Bulk Number Approval Request\n\nআপনি একসাথে কতগুলো নাম্বার নিতে চান এবং কোন সার্ভিস/দেশ লাগবে তা লিখে পাঠান (যেমন: 30 Facebook অথবা 50):\n\nবাতিল করতে /cancel লিখুন।";
+        await tg.sendMessage(chatId, `✏️ <b>Edit Bulk Request Prompt Text</b>\n\n<b>Current Text:</b>\n<blockquote>${escapeHtml(curTxt)}</blockquote>\n\nSend the new text you want users to see when they click <b>Send Approval Request</b>.\n\n<i>Send <code>reset</code> to restore default, or /cancel to abort.</i>`);
       } else if (data === "adm_bulk_sys_toggle") {
         walletConfig.bulk_system_enabled = walletConfig.bulk_system_enabled === false;
         await db.saveWalletConfig(walletConfig);
@@ -1906,7 +1920,38 @@ async function handleTelegramUpdate(update, env, ctx = null) {
         await db.saveWalletConfig(walletConfig);
         await tg.safeEditMessage(chatId, msgId, "✅ All required channels cleared (Force Join disabled).", adminPanelKb(uid, env, walletConfig));
       }
-      else if (data === "adm_menu_otp") await tg.safeEditMessage(chatId, msgId, "📥 <b>OTP System & Inbox</b>", ikb([[btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })], [btn("👥 OTP Group Settings", { callback_data: "adm_otp_group_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })], [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
+      else if (data === "adm_menu_otp") {
+        const apis = walletConfig.otp_inbox_api?.apis || [];
+        const kb = ikb([
+          [btn("➕ Add API (URL & Key)", { callback_data: "adm_otp_api_add", style: "success" }), btn(`📋 Manage APIs (${apis.length})`, { callback_data: "adm_otp_api_list", style: "primary" })],
+          [btn("🔄 Poll APIs Now", { callback_data: "adm_otp_api_poll", style: "primary" }), btn("👥 OTP Group Settings", { callback_data: "adm_otp_group_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })],
+          [btn("Back", { callback_data: "adm_panel", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
+        ]);
+        await tg.safeEditMessage(chatId, msgId, `📥 <b>OTP System & Inbox</b>\n\n⚡ <b>Direct Webhook URL (&lt;1s Push):</b>\n<code>https://number-bot-10.pages.dev/api/otp</code>\n<i>(Supports GET &amp; POST: number, sms, service, code, secret)</i>\n\n🔌 <b>Configured REST APIs:</b> ${apis.length}`, kb);
+      } else if (data === "adm_otp_api_list") {
+        const apis = walletConfig.otp_inbox_api?.apis || [];
+        const rows = apis.map((a) => [
+          btn(`${a.enabled ? "🟢" : "🔴"} ${a.name}`, { callback_data: `adm_otp_api_toggle|${a.id}`, style: a.enabled ? "success" : "primary" }),
+          btn("🗑️ Delete", { callback_data: `adm_otp_api_del|${a.id}`, style: "danger" }),
+        ]);
+        rows.push([btn("➕ Add API", { callback_data: "adm_otp_api_add", style: "success" })]);
+        rows.push([btn("🔙 Back", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]);
+        const txt = apis.length ? `📋 <b>Saved OTP APIs (${apis.length})</b>\nTap name to toggle ON/OFF, or Delete:` : "📋 <b>Saved OTP APIs</b>\n\n<i>No APIs added yet. Tap Add API below!</i>";
+        await tg.safeEditMessage(chatId, msgId, txt, ikb(rows));
+      } else if (data.startsWith("adm_otp_api_toggle|")) {
+        const apiId = data.split("|")[1];
+        const apis = walletConfig.otp_inbox_api?.apis || [];
+        const target = apis.find((a) => a.id === apiId);
+        if (target) { target.enabled = !target.enabled; await db.saveWalletConfig(walletConfig); }
+        await tg.safeEditMessage(chatId, msgId, target ? `✅ API <b>${escapeHtml(target.name)}</b> is now <b>${target.enabled ? "ON" : "OFF"}</b>.` : "⚠️ API not found.", ikb([[btn("📋 Back to APIs", { callback_data: "adm_otp_api_list" })]]));
+      } else if (data.startsWith("adm_otp_api_del|")) {
+        const apiId = data.split("|")[1];
+        if (walletConfig.otp_inbox_api?.apis) {
+          walletConfig.otp_inbox_api.apis = walletConfig.otp_inbox_api.apis.filter((a) => a.id !== apiId);
+          await db.saveWalletConfig(walletConfig);
+        }
+        await tg.safeEditMessage(chatId, msgId, "🗑️ API deleted.", ikb([[btn("📋 Back to APIs", { callback_data: "adm_otp_api_list" })]]));
+      }
       else if (data === "adm_otp_group_menu") {
         const curUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
         const curSrc = walletConfig.otp_source_chat_id || env.OTP_SOURCE_CHAT_ID || "-1003888145264";
@@ -2386,6 +2431,11 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     await db.saveWalletConfig(walletConfig);
     u.pending_action = null; await db.saveUser(uid, u);
     await tg.sendMessage(chatId, `✅ Default Bulk Number limit saved to <b>${val}</b>!`, { reply_markup: ikb([[btn("🟢 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]) });
+  } else if (pa.action === "adm_bulk_req_text" && isAdminUser(uid, env, walletConfig)) {
+    walletConfig.bulk_request_prompt = text.trim().toLowerCase() === "reset" ? "" : text.trim();
+    await db.saveWalletConfig(walletConfig);
+    u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, walletConfig.bulk_request_prompt ? `✅ Bulk Request prompt text updated!` : `✅ Bulk Request prompt text reset to default!`, { reply_markup: ikb([[btn("🟢 Back to Bulk Manage", { callback_data: "adm_bulk_settings_menu" })]]) });
   } else if (pa.action === "adm_set_bulk_limit" && isAdminUser(uid, env, walletConfig)) {
     const val = parseInt(text.trim(), 10);
     if (isNaN(val) || val < 1 || val > 5000) {
@@ -2478,12 +2528,17 @@ async function handleTelegramUpdate(update, env, ctx = null) {
     u.pending_action = null; await db.saveUser(uid, u);
     await tg.sendMessage(chatId, `✅ Provider <b>${escapeHtml(prov)}</b> added!`, { reply_markup: adminPanelKb(uid, env, walletConfig) });
   } else if (pa.action === "adm_otp_api_add" && isAdminUser(uid, env, walletConfig)) {
-    const [name, url, token = ""] = text.split("|").map((s) => s.trim());
-    if (name && url) {
-      walletConfig.otp_inbox_api.apis.push({ id: `api_${nowTs()}`, name, url, token, scheme: "param_token", enabled: true });
-      await db.saveWalletConfig(walletConfig); u.pending_action = null; await db.saveUser(uid, u);
-      await tg.sendMessage(chatId, `✅ API <b>${escapeHtml(name)}</b> added!`);
+    const [name, apiUrl, token = ""] = text.split("|").map((s) => s.trim());
+    if (!name || !apiUrl) {
+      await tg.sendMessage(chatId, "❌ Invalid format. Send: <code>Name | URL | Token</code> (or <code>Name | Full_URL</code>).");
+      return new Response("OK");
     }
+    if (!walletConfig.otp_inbox_api) walletConfig.otp_inbox_api = { enabled: true, poll_seconds: 12, apis: [] };
+    if (!Array.isArray(walletConfig.otp_inbox_api.apis)) walletConfig.otp_inbox_api.apis = [];
+    walletConfig.otp_inbox_api.enabled = true;
+    walletConfig.otp_inbox_api.apis.push({ id: `api_${nowTs()}`, name, url: apiUrl, token, scheme: "param_token", enabled: true });
+    await db.saveWalletConfig(walletConfig); u.pending_action = null; await db.saveUser(uid, u);
+    await tg.sendMessage(chatId, `✅ API <b>${escapeHtml(name)}</b> added & enabled!`, { reply_markup: ikb([[btn("📋 Manage APIs", { callback_data: "adm_otp_api_list" }), btn("🔄 Poll Now", { callback_data: "adm_otp_api_poll" })]]) });
   } else if (pa.action === "adm_add_channel" && isAdminUser(uid, env, walletConfig)) {
     const entry = parseChannelEntry(text);
     if (!entry.id) { await tg.sendMessage(chatId, "❌ Invalid channel format. Try again or /cancel."); return new Response("OK"); }
@@ -2545,19 +2600,32 @@ export default {
       return new Response(JSON.stringify({ ok: true, polled }), { headers: { "Content-Type": "application/json" } });
     }
 
-    if (request.method === "POST" && path === "/api/otp") {
-      const secret = url.searchParams.get("secret") || request.headers.get("x-cron-secret") || "";
+    if ((request.method === "POST" || request.method === "GET") && path === "/api/otp") {
+      const authHdr = request.headers.get("authorization") || "";
+      const bearerSecret = authHdr.toLowerCase().startsWith("bearer ") ? authHdr.slice(7).trim() : "";
+      const secret = url.searchParams.get("secret") || request.headers.get("x-cron-secret") || bearerSecret || "";
       if (env.CRON_SECRET && secret !== env.CRON_SECRET) return new Response("Unauthorized", { status: 401 });
       if (!env.BOT_TOKEN || !env.DB) return new Response("Missing BOT_TOKEN or DB", { status: 500 });
       try {
-        const body = await request.json();
+        let body = {};
+        if (request.method === "POST") {
+          const ct = (request.headers.get("content-type") || "").toLowerCase();
+          if (ct.includes("application/json")) {
+            body = await request.json().catch(() => ({}));
+          } else if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) {
+            const fd = await request.formData();
+            for (const [k, v] of fd.entries()) body[k] = v;
+          } else {
+            body = await request.json().catch(() => ({}));
+          }
+        }
+        const rawNum = String(body.number || body.phone || body.num || body.did || url.searchParams.get("number") || url.searchParams.get("phone") || url.searchParams.get("num") || "").trim();
+        const rawSms = String(body.sms || body.message || body.text || body.msg || body.body || url.searchParams.get("sms") || url.searchParams.get("message") || url.searchParams.get("text") || "");
+        const rawSvc = normalizeServiceName(body.service || body.cli || body.app || body.sender || url.searchParams.get("service") || url.searchParams.get("cli") || "Unknown");
+        const rawCode = String(body.code || body.otp || url.searchParams.get("code") || url.searchParams.get("otp") || extractOtpCode(rawSms, [rawNum]) || "N/A");
         const db = new BotDB(env.DB), tg = new TelegramAPI(env.BOT_TOKEN);
         await db.preloadCore();
         const walletConfig = await db.getWalletConfig(), platforms = await db.getPlatforms();
-        const rawNum = String(body.number || "").trim();
-        const rawSms = String(body.sms || body.message || "");
-        const rawSvc = normalizeServiceName(body.service || "Unknown");
-        const rawCode = String(body.code || extractOtpCode(rawSms, [rawNum]) || "N/A");
         const delivered = await deliverVerifiedOtp(db, tg, walletConfig, platforms, rawNum, rawSvc, rawCode, rawSms);
         return new Response(JSON.stringify({ ok: true, delivered }), { headers: { "Content-Type": "application/json" } });
       } catch (e) {
