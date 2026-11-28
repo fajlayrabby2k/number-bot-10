@@ -1101,7 +1101,7 @@ async function deliverNumbersToUser(db, tg, chatId, msgId, uid, svc, ccode, wall
     rows.push([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
   }
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
-  rows.push([btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
+  if (walletConfig?.show_otp_group_btn === true) rows.push([btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
   if (msgId) await tg.safeEditMessage(chatId, msgId, msgHtml, ikb(rows)); else await tg.sendMessage(chatId, msgHtml, { reply_markup: ikb(rows) });
 }
 
@@ -1147,11 +1147,14 @@ async function deliverBulkNumbersToUser(db, tg, chatId, uid, svc, ccode, qty, wa
   const bytes = new TextEncoder().encode(fullNums.join("\n"));
   const otpGroupUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
   const caption = `<blockquote><b>🟢 Bulk Numbers Delivered</b>\n\n${getPlatformEmojiHtml(svc, platforms)} <b>Service:</b> ${escapeHtml(svc)}\n${getCountryFlagEmoji(dial)} <b>Country:</b> ${escapeHtml(getCountryDisplayName(ccode))}\n📦 <b>Quantity:</b> ${fullNums.length} numbers\n⏳ <b>Hold Time:</b> ${NUMBER_VALIDITY_SECONDS / 60} minutes</blockquote>`;
-  const bulkBtns = [[btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]];
+  const bulkBtns = [];
   if (walletConfig?.show_check_otp_btn !== false && walletConfig?.otp_inbox_api?.enabled && (walletConfig.otp_inbox_api.apis || []).some((a) => a.enabled)) {
-    bulkBtns.unshift([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
+    bulkBtns.push([btn("📩 Check OTP", { callback_data: "user_check_otp", style: "primary" })]);
   }
-  await tg.sendDocument(chatId, bytes, `${svc}_${ccode}_bulk_${fullNums.length}.txt`, caption, ikb(bulkBtns));
+  if (walletConfig?.show_otp_group_btn === true) {
+    bulkBtns.push([btn("👥 OTP Group", { url: otpGroupUrl, icon_custom_emoji_id: CUSTOM_EMOJIS.otp_group })]);
+  }
+  await tg.sendDocument(chatId, bytes, `${svc}_${ccode}_bulk_${fullNums.length}.txt`, caption, bulkBtns.length ? ikb(bulkBtns) : null);
 }
 
 function getCycleInfo(ts = null, st = {}) {
@@ -1987,12 +1990,19 @@ async function handleTelegramUpdate(update, env, ctx = null) {
       else if (data === "adm_otp_group_menu") {
         const curUrl = walletConfig?.channel_logs?.otp_group?.channel_url || "https://t.me/+Nlyujg2sScVhMzc1";
         const curSrc = walletConfig.otp_source_chat_id || env.OTP_SOURCE_CHAT_ID || "-1003888145264";
+        const showGrpBtn = walletConfig.show_otp_group_btn === true;
         const kb = ikb([
+          [btn(showGrpBtn ? "👥 OTP Group Btn: ON" : "👥 OTP Group Btn: OFF", { callback_data: "adm_toggle_otp_group_btn", style: showGrpBtn ? "success" : "danger" })],
           [btn("🔗 Set OTP Group Link", { callback_data: "adm_set_otp_group_url", style: "success" })],
           [btn("🆔 Set OTP Source Chat ID", { callback_data: "adm_set_otp_source_id" })],
           [btn("Back", { callback_data: "adm_menu_otp", icon_custom_emoji_id: CUSTOM_EMOJIS.back })],
         ]);
-        await tg.safeEditMessage(chatId, msgId, `👥 <b>OTP Group Settings</b>\n\n🔗 <b>OTP Group Link:</b> <code>${escapeHtml(curUrl)}</code>\n🆔 <b>OTP Source Chat ID:</b> <code>${escapeHtml(curSrc)}</code>`, kb);
+        await tg.safeEditMessage(chatId, msgId, `👥 <b>OTP Group Settings</b>\n\n• <b>Group Button Status:</b> ${showGrpBtn ? "🟢 ON (Visible)" : "🔴 OFF (Hidden)"}\n🔗 <b>OTP Group Link:</b> <code>${escapeHtml(curUrl)}</code>\n🆔 <b>OTP Source Chat ID:</b> <code>${escapeHtml(curSrc)}</code>`, kb);
+      } else if (data === "adm_toggle_otp_group_btn") {
+        walletConfig.show_otp_group_btn = walletConfig.show_otp_group_btn !== true;
+        await db.saveWalletConfig(walletConfig);
+        const onNow = walletConfig.show_otp_group_btn === true;
+        await tg.safeEditMessage(chatId, msgId, `✅ User <b>👥 OTP Group</b> button is now <b>${onNow ? "🟢 ON (Visible)" : "🔴 OFF (Hidden)"}</b>.`, ikb([[btn("🔙 Back to OTP Group Settings", { callback_data: "adm_otp_group_menu", icon_custom_emoji_id: CUSTOM_EMOJIS.back })]]));
       } else if (data === "adm_set_otp_group_url") {
         const u = await db.getUser(uid); if (u) { u.pending_action = { action: "adm_set_otp_group_url" }; await db.saveUser(uid, u); }
         await tg.sendMessage(chatId, "🔗 Send the new <b>OTP Group Invite Link</b> (e.g. <code>https://t.me/+...</code> or <code>https://t.me/groupname</code>):\nSend /cancel to abort.");
